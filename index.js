@@ -17,13 +17,17 @@ export default class GstPlayer extends React.Component {
     appState = "active"
     isInitialized = false
 
+    appStateSubscription = null;
+
     componentDidMount() {
-        this.playerHandle = findNodeHandle(this.playerViewRef)
-        AppState.addEventListener('change', this.appStateChanged)
+        this.playerHandle = findNodeHandle(this.playerViewRef);
+        this.appStateSubscription = AppState.addEventListener('change', this.appStateChanged);
     }
 
     componentWillUnmount() {
-        AppState.removeEventListener('change', this.appStateChanged)
+        if (this.appStateSubscription) {
+            this.appStateSubscription.remove();
+        }
     }
 
     appStateChanged = (nextAppState) => {
@@ -50,6 +54,7 @@ export default class GstPlayer extends React.Component {
 
     onStateChanged(_message) {
         const { old_state, new_state } = _message.nativeEvent
+        console.log(_message.nativeEvent)
         this.currentGstState = new_state
 
         if (old_state === GstState.PAUSED && new_state === GstState.READY) {
