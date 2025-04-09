@@ -270,6 +270,10 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
     return TRUE;
 }
 
+static void cb_source_created(GstElement *pipe, GstElement *source) {
+    g_object_set(source, "latency", 0, "buffer-mode", 1, "max-ts-offset", 0, NULL);
+}
+
 /*************
  OTHER METHODS
  ************/
@@ -287,7 +291,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command;
 
     // Prepare playbin pipeline. If playbin not working, will display an error video signal
-    launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin" : "videotestsrc ! glimagesink name=video-sink";
+    launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin video-sink=\"queue ! autovideosink sync=false\"" : "videotestsrc ! glimagesink name=video-sink";
     pipeline = gst_parse_launch(launch_command, NULL);
     
     // Preparing bus
@@ -298,7 +302,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
-    
+
+    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
+
     // Change audio sink with a custom one(Allow volume analysis)
     if (!rct_gst_get_configuration()->isDebugging) {
         audio_sink = create_audio_sink();
