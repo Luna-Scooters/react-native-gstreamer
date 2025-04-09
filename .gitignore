@@ -62,7 +62,6 @@ build/
 android/RCTGstPlayer/src/org/
 android/RCTGstPlayer/src/main/assets/
 android/RCTGstPlayer/proguard-rules.pro
-android/RCTGstPlayer/src/main/java/org/freedesktop/gstreamer/
 android/RCTGstPlayer/.externalNativeBuild
 android/RCTGstPlayer/build/
 android/RCTGstPlayer/gst-build-armeabi/
