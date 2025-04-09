@@ -1,8 +1,9 @@
 package com.kalyzee.rctgstplayer;
 
-import android.support.annotation.Nullable;
 import android.view.View;
 
+
+import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.common.MapBuilder;
@@ -70,7 +71,8 @@ public class RCTGstPlayer extends SimpleViewManager {
      */
 
     // Events callbacks
-    @Nullable @Override
+    @Nullable
+    @Override
     public Map<String, Object> getExportedCustomDirectEventTypeConstants() {
         return MapBuilder.<String, Object>builder()
                 .put(

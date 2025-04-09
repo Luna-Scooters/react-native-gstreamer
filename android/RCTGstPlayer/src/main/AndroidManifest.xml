@@ -2,7 +2,7 @@
     package="com.kalyzee.rctgstplayer">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true"/>
 </manifest>
