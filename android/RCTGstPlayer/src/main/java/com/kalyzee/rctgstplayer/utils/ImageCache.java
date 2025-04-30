@@ -3,6 +3,8 @@ package com.kalyzee.rctgstplayer.utils;
 import android.graphics.Bitmap;
 import android.util.LruCache;
 
+import java.util.HashMap;
+
 public class ImageCache {
   private static volatile ImageCache instance;
   private static final Object LOCK = new Object();
@@ -24,5 +26,11 @@ public class ImageCache {
 
   public void setBitmap(Bitmap bitmap) { cacheBitmap.put(cacheKey, bitmap); }
 
-  public Bitmap getBitmap() { return cacheBitmap.get(cacheKey); }
+  public Bitmap getBitmap(Boolean evict) {
+    HashMap<String, Bitmap> cache = (HashMap<String, Bitmap>) cacheBitmap.snapshot();
+    if (evict) {
+      cacheBitmap.remove(cacheKey);
+    }
+    return cache.get(cacheKey);
+  }
 }
