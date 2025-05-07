@@ -272,11 +272,13 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
     g_object_set(source,
-                "latency", 150,
+                "latency", 150, /* 150 ms */
                 "buffer-mode", 0,
                 "drop-on-latency", TRUE,
                 "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000,
+                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
+                "protocols", 0x03, /* UDP + UDP_MCAST */
+                "udp-buffer-size", 5242880, /* 5 MB */
                 NULL);
 }
 
