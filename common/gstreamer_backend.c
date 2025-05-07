@@ -271,7 +271,13 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 }
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
-    g_object_set(source, "latency", 0, "buffer-mode", 1, "max-ts-offset", 0, NULL);
+    g_object_set(source,
+                "latency", 150,
+                "buffer-mode", 0,
+                "drop-on-latency", TRUE,
+                "ntp-sync", FALSE,
+                "max-ts-offset", 50 * 1000 * 1000,
+                NULL);
 }
 
 /*************
