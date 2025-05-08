@@ -239,6 +239,52 @@ static gboolean cb_async_done(GstBus *bus, GstMessage *message, gpointer user_da
     return TRUE;
 }
 
+static gboolean restart_stream(gpointer data) {
+     g_print("Restarting RTSP stream...\n");
+
+     // Stop the stream
+     gst_element_set_state(pipeline, GST_STATE_NULL);
+
+     // Restart it
+     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
+     if (ret == GST_STATE_CHANGE_FAILURE) {
+         g_printerr("Failed to restart pipeline\n");
+     } else {
+         g_print("Stream restarted successfully.\n");
+     }
+
+     return TRUE;
+}
+
+static const guint64 qos_count_max = 100;
+static guint refresh_qos_count_ms = 10000; // 10 seconds
+static guint64 qos_count = 0;
+static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
+{
+    // Show element name
+    const GstStructure *s = gst_message_get_structure(message);
+    if (s) {
+        const gchar *element = gst_element_get_name(GST_MESSAGE_SRC(message));
+        g_print("QoS event from element: %s\n", element);
+    }
+
+    // Increment the QoS counter
+    qos_count++;
+    if (qos_count >= qos_count_max) {
+        g_print("QoS counter reached maximum: %lu\n", qos_count);
+        // Reset the counter
+        qos_count = 0;
+        restart_stream(user_data);
+    }
+
+    return TRUE;
+}
+
+static gboolean cb_reset_qos_counter(gpointer data) {
+    qos_count = 0;
+    return TRUE;
+}
+
 static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_data)
 {
     switch (GST_MESSAGE_TYPE(message))
@@ -263,6 +309,10 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
             cb_async_done(bus, message, user_data);
             break;
             
+        case GST_MESSAGE_QOS:
+            cb_qos(bus, message, user_data);
+            break;
+
         default:
             break;
     }
@@ -272,11 +322,14 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
     g_object_set(source,
-                "latency", 150,
+                "latency", 150, /* 150 ms */
                 "buffer-mode", 0,
                 "drop-on-latency", TRUE,
                 "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000,
+                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
+                "protocols", 0x03, /* UDP + UDP_MCAST */
+                "udp-buffer-size", 5242880, /* 5 MB */
+                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
                 NULL);
 }
 
@@ -310,6 +363,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gst_object_unref(bus);
 
     g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
+
+    // Restart QoS Counter once in a while
+    g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
     // Change audio sink with a custom one(Allow volume analysis)
     if (!rct_gst_get_configuration()->isDebugging) {
