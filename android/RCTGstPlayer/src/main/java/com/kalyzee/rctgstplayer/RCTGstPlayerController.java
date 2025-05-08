@@ -112,6 +112,9 @@ public class RCTGstPlayerController
         .receiveEvent(view.getId(), "onElementError", event);
   }
 
+  private final int captureFps = 30; /* Capture Frame Rate of 30 FPS */
+  private final double capturePeriodMs = (1.0 / (double)captureFps) * 1000.0; /* Convert Capture FPS to Capture Period in ms */
+  private long lastCaptureTimeMs = System.currentTimeMillis();
   private void threadCopyImageFunc() {
     while (runCopyImageThread.get()) {
       try {
@@ -123,9 +126,18 @@ public class RCTGstPlayerController
             if (ret == PixelCopy.SUCCESS) {
               ImageCache.getInstance().setBitmap(bitmap);
             }
+            lastCaptureTimeMs = System.currentTimeMillis();
             latchCopyImage.countDown();
           }, new Handler(Looper.getMainLooper()));
           latchCopyImage.await(500, TimeUnit.MILLISECONDS);
+
+          /* Sleep Thread to keep the capture rate */
+          long currentTimeMs = System.currentTimeMillis();
+          long timeDiffMs = currentTimeMs - lastCaptureTimeMs;
+          long sleepPeriodMs = (long)(capturePeriodMs - timeDiffMs);
+          if (sleepPeriodMs > 0) {
+            Thread.sleep(sleepPeriodMs);
+          }
         }
         Thread.yield();
       } catch (InterruptedException e) {
