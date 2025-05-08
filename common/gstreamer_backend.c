@@ -279,6 +279,7 @@ static void cb_source_created(GstElement *pipe, GstElement *source) {
                 "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
                 "protocols", 0x03, /* UDP + UDP_MCAST */
                 "udp-buffer-size", 5242880, /* 5 MB */
+                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
                 NULL);
 }
 
