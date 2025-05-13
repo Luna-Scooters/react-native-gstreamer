@@ -40,14 +40,8 @@ GST_PLUGIN_STATIC_DECLARE(rawparse);
 #if defined(GST_IOS_PLUGIN_TYPEFINDFUNCTIONS) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(typefindfunctions);
 #endif
-#if defined(GST_IOS_PLUGIN_VIDEOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
-GST_PLUGIN_STATIC_DECLARE(videoconvert);
-#endif
 #if defined(GST_IOS_PLUGIN_VIDEORATE) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(videorate);
-#endif
-#if defined(GST_IOS_PLUGIN_VIDEOSCALE) || defined(GST_IOS_PLUGINS_CORE)
-GST_PLUGIN_STATIC_DECLARE(videoscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOTESTSRC) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(videotestsrc);
@@ -69,9 +63,6 @@ GST_PLUGIN_STATIC_DECLARE(asfmux);
 #endif
 #if defined(GST_IOS_PLUGIN_DTSDEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
 GST_PLUGIN_STATIC_DECLARE(dtsdec);
-#endif
-#if defined(GST_IOS_PLUGIN_FAAD) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
-GST_PLUGIN_STATIC_DECLARE(faad);
 #endif
 #if defined(GST_IOS_PLUGIN_MPEGPSDEMUX) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
 GST_PLUGIN_STATIC_DECLARE(mpegpsdemux);
@@ -106,9 +97,6 @@ GST_PLUGIN_STATIC_DECLARE(dvdsub);
 #if defined(GST_IOS_PLUGIN_DVDLPCMDEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
 GST_PLUGIN_STATIC_DECLARE(dvdlpcmdec);
 #endif
-#if defined(GST_IOS_PLUGIN_MPEG2DEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
-GST_PLUGIN_STATIC_DECLARE(mpeg2dec);
-#endif
 #if defined(GST_IOS_PLUGIN_XINGMUX) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
 GST_PLUGIN_STATIC_DECLARE(xingmux);
 #endif
@@ -133,9 +121,6 @@ GST_PLUGIN_STATIC_DECLARE(encoding);
 #if defined(GST_IOS_PLUGIN_ASSRENDER) || defined(GST_IOS_PLUGINS_CODECS_GPL)
 GST_PLUGIN_STATIC_DECLARE(assrender);
 #endif
-#if defined(GST_IOS_PLUGIN_MMS) || defined(GST_IOS_PLUGINS_NET_RESTRICTED)
-GST_PLUGIN_STATIC_DECLARE(mms);
-#endif
 #if defined(GST_IOS_PLUGIN_RTMP) || defined(GST_IOS_PLUGINS_NET_RESTRICTED)
 GST_PLUGIN_STATIC_DECLARE(rtmp);
 #endif
@@ -150,9 +135,6 @@ GST_PLUGIN_STATIC_DECLARE(shm);
 #endif
 #if defined(GST_IOS_PLUGIN_OPENGL) || defined(GST_IOS_PLUGINS_SYS)
 GST_PLUGIN_STATIC_DECLARE(opengl);
-#endif
-#if defined(GST_IOS_PLUGIN_LIBVISUAL) || defined(GST_IOS_PLUGINS_VIS)
-GST_PLUGIN_STATIC_DECLARE(libvisual);
 #endif
 #if defined(GST_IOS_PLUGIN_GOOM) || defined(GST_IOS_PLUGINS_VIS)
 GST_PLUGIN_STATIC_DECLARE(goom);
@@ -322,9 +304,6 @@ GST_PLUGIN_STATIC_DECLARE(vorbis);
 #if defined(GST_IOS_PLUGIN_OPUS) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(opus);
 #endif
-#if defined(GST_IOS_PLUGIN_IVORBISDEC) || defined(GST_IOS_PLUGINS_CODECS)
-GST_PLUGIN_STATIC_DECLARE(ivorbisdec);
-#endif
 #if defined(GST_IOS_PLUGIN_ALAW) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(alaw);
 #endif
@@ -403,9 +382,6 @@ GST_PLUGIN_STATIC_DECLARE(adpcmdec);
 #if defined(GST_IOS_PLUGIN_ADPCMENC) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(adpcmenc);
 #endif
-#if defined(GST_IOS_PLUGIN_DASHDEMUX) || defined(GST_IOS_PLUGINS_CODECS)
-GST_PLUGIN_STATIC_DECLARE(dashdemux);
-#endif
 #if defined(GST_IOS_PLUGIN_DVBSUBOVERLAY) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(dvbsuboverlay);
 #endif
@@ -417,9 +393,6 @@ GST_PLUGIN_STATIC_DECLARE(hls);
 #endif
 #if defined(GST_IOS_PLUGIN_ID3TAG) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(id3tag);
-#endif
-#if defined(GST_IOS_PLUGIN_KATE) || defined(GST_IOS_PLUGINS_CODECS)
-GST_PLUGIN_STATIC_DECLARE(kate);
 #endif
 #if defined(GST_IOS_PLUGIN_MIDI) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(midi);
@@ -542,7 +515,7 @@ gst_ios_init (void)
   g_free (ca_certificates);
     
   gst_init (NULL, NULL);
-
+  
   #if defined(GST_IOS_PLUGIN_NLE) || defined(GST_IOS_PLUGINS_GES)
     GST_PLUGIN_STATIC_REGISTER(nle);
 #endif
@@ -582,14 +555,8 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_TYPEFINDFUNCTIONS) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(typefindfunctions);
 #endif
-#if defined(GST_IOS_PLUGIN_VIDEOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
-    GST_PLUGIN_STATIC_REGISTER(videoconvert);
-#endif
 #if defined(GST_IOS_PLUGIN_VIDEORATE) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(videorate);
-#endif
-#if defined(GST_IOS_PLUGIN_VIDEOSCALE) || defined(GST_IOS_PLUGINS_CORE)
-    GST_PLUGIN_STATIC_REGISTER(videoscale);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOTESTSRC) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(videotestsrc);
@@ -611,9 +578,6 @@ gst_ios_init (void)
 #endif
 #if defined(GST_IOS_PLUGIN_DTSDEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
     GST_PLUGIN_STATIC_REGISTER(dtsdec);
-#endif
-#if defined(GST_IOS_PLUGIN_FAAD) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
-    GST_PLUGIN_STATIC_REGISTER(faad);
 #endif
 #if defined(GST_IOS_PLUGIN_MPEGPSDEMUX) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
     GST_PLUGIN_STATIC_REGISTER(mpegpsdemux);
@@ -648,9 +612,6 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_DVDLPCMDEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
     GST_PLUGIN_STATIC_REGISTER(dvdlpcmdec);
 #endif
-#if defined(GST_IOS_PLUGIN_MPEG2DEC) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
-    GST_PLUGIN_STATIC_REGISTER(mpeg2dec);
-#endif
 #if defined(GST_IOS_PLUGIN_XINGMUX) || defined(GST_IOS_PLUGINS_CODECS_RESTRICTED)
     GST_PLUGIN_STATIC_REGISTER(xingmux);
 #endif
@@ -675,9 +636,6 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_ASSRENDER) || defined(GST_IOS_PLUGINS_CODECS_GPL)
     GST_PLUGIN_STATIC_REGISTER(assrender);
 #endif
-#if defined(GST_IOS_PLUGIN_MMS) || defined(GST_IOS_PLUGINS_NET_RESTRICTED)
-    GST_PLUGIN_STATIC_REGISTER(mms);
-#endif
 #if defined(GST_IOS_PLUGIN_RTMP) || defined(GST_IOS_PLUGINS_NET_RESTRICTED)
     GST_PLUGIN_STATIC_REGISTER(rtmp);
 #endif
@@ -692,9 +650,6 @@ gst_ios_init (void)
 #endif
 #if defined(GST_IOS_PLUGIN_OPENGL) || defined(GST_IOS_PLUGINS_SYS)
     GST_PLUGIN_STATIC_REGISTER(opengl);
-#endif
-#if defined(GST_IOS_PLUGIN_LIBVISUAL) || defined(GST_IOS_PLUGINS_VIS)
-    GST_PLUGIN_STATIC_REGISTER(libvisual);
 #endif
 #if defined(GST_IOS_PLUGIN_GOOM) || defined(GST_IOS_PLUGINS_VIS)
     GST_PLUGIN_STATIC_REGISTER(goom);
@@ -864,9 +819,6 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_OPUS) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(opus);
 #endif
-#if defined(GST_IOS_PLUGIN_IVORBISDEC) || defined(GST_IOS_PLUGINS_CODECS)
-    GST_PLUGIN_STATIC_REGISTER(ivorbisdec);
-#endif
 #if defined(GST_IOS_PLUGIN_ALAW) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(alaw);
 #endif
@@ -945,9 +897,6 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_ADPCMENC) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(adpcmenc);
 #endif
-#if defined(GST_IOS_PLUGIN_DASHDEMUX) || defined(GST_IOS_PLUGINS_CODECS)
-    GST_PLUGIN_STATIC_REGISTER(dashdemux);
-#endif
 #if defined(GST_IOS_PLUGIN_DVBSUBOVERLAY) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(dvbsuboverlay);
 #endif
@@ -959,9 +908,6 @@ gst_ios_init (void)
 #endif
 #if defined(GST_IOS_PLUGIN_ID3TAG) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(id3tag);
-#endif
-#if defined(GST_IOS_PLUGIN_KATE) || defined(GST_IOS_PLUGINS_CODECS)
-    GST_PLUGIN_STATIC_REGISTER(kate);
 #endif
 #if defined(GST_IOS_PLUGIN_MIDI) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(midi);
