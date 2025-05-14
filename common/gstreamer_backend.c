@@ -351,7 +351,13 @@ void rct_gst_init(RctGstConfiguration *configuration)
 
     // Prepare playbin pipeline. If playbin not working, will display an error video signal
     launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin video-sink=\"queue ! autovideosink sync=false\"" : "videotestsrc ! glimagesink name=video-sink";
-    pipeline = gst_parse_launch(launch_command, NULL);
+    GError *error = NULL;
+    pipeline = gst_parse_launch(launch_command, &error);
+    if (error != NULL) {
+        g_printerr("Error creating pipeline: %s\n", error->message);
+        g_error_free(error);
+        return;
+    }
     
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
