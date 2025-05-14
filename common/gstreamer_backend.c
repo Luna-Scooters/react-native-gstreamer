@@ -356,6 +356,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (error != NULL) {
         g_printerr("Error creating pipeline: %s\n", error->message);
         g_error_free(error);
+        return;
     }
     
     // Preparing bus
