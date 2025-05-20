@@ -1,6 +1,3 @@
-// ImageCache.m
-// Implementation of the ImageCache singleton
-
 #import "ImageCache.h"
 
 @implementation ImageCache {

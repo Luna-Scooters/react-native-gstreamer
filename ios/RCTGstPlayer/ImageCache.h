@@ -1,6 +1,3 @@
-// ImageCache.h
-// Singleton cache for storing UIImage objects
-
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
