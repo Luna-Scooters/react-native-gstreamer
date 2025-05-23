@@ -113,9 +113,15 @@ dispatch_queue_t events_queue;
         @autoreleasepool {
             if (self->drawableSurface) {
                 CGRect bounds = self->drawableSurface.bounds;
+                
+                if (bounds.size.width <= 0 || bounds.size.height <= 0) {
+                    [NSThread sleepForTimeInterval:0.1];
+                    continue;
+                }
 
+                // Create new image renderer if needed
                 if (imageRenderer == nil || !CGRectEqualToRect(bounds, lastCapturedBounds)) {
-                    // Create a new image renderer if needed
+                    imageRenderer = nil;
                     imageRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size];
                     lastCapturedBounds = bounds;
                 }
@@ -124,25 +130,20 @@ dispatch_queue_t events_queue;
                 }];
                 
                 if (image) {
-                    UIImage *cachedImage = [[ImageCache getInstance] getImage:YES];
-                    
-                    if (cachedImage == nil || ![cachedImage isEqual:image]) {
-                        [[ImageCache getInstance] setImage:image];
-                    }
+                    [[ImageCache getInstance] setImage:image];
                 }
             }
-            
-            // Record the capture time
-            self->lastCaptureTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
-            
-            // Sleep to maintain capture rate
-            int currentTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
-            int timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
-            int sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
-            
-            if (sleepPeriodMs > 0) {
-                [NSThread sleepForTimeInterval:sleepPeriodMs / 1000.0];
-            }
+        }
+
+        self->lastCaptureTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
+        
+        // Sleep to maintain capture rate
+        int currentTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
+        int timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
+        int sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
+        
+        if (sleepPeriodMs > 0) {
+            [NSThread sleepForTimeInterval:sleepPeriodMs / 1000.0];
         }
     }
 }
