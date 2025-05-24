@@ -20,7 +20,6 @@
     int captureFps;
     int capturePeriodMs;
     UIGraphicsImageRenderer *imageRenderer;
-    CGRect lastCapturedBounds;
 }
 
 @end
@@ -59,10 +58,9 @@ dispatch_queue_t events_queue;
         runCopyImageThread = NO;
         captureFps = 30;
         capturePeriodMs = (1000 / captureFps);
-        lastCaptureTimeMs = 0;
+        lastCaptureTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);;
 
         imageRenderer = nil;
-        lastCapturedBounds = CGRectMake(0, 0, 0, 0);
         
         new_uri = g_malloc(sizeof(gchar));
         
@@ -111,36 +109,34 @@ dispatch_queue_t events_queue;
     NSLog(@"Starting image capture thread");
     while (runCopyImageThread) {
         @autoreleasepool {
-            if (self->drawableSurface) {
+            __block UIImage *image = nil;
+            
+            dispatch_sync(dispatch_get_main_queue(), ^{
                 CGRect bounds = self->drawableSurface.bounds;
-                
                 if (bounds.size.width <= 0 || bounds.size.height <= 0) {
                     [NSThread sleepForTimeInterval:0.1];
-                    continue;
+                    return;
                 }
 
-                // Create new image renderer if needed
-                if (imageRenderer == nil || !CGRectEqualToRect(bounds, lastCapturedBounds)) {
-                    imageRenderer = nil;
+                if (imageRenderer == nil) {
                     imageRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size];
-                    lastCapturedBounds = bounds;
                 }
-                UIImage *image = [imageRenderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
+                
+                image = [imageRenderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
                     [self->drawableSurface drawViewHierarchyInRect:bounds afterScreenUpdates:NO];
                 }];
-                
-                if (image) {
-                    [[ImageCache getInstance] setImage:image];
-                }
+            });
+            
+            if (image) {
+                [[ImageCache getInstance] setImage:image];
             }
         }
-
-        self->lastCaptureTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
         
-        // Sleep to maintain capture rate
         int currentTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
         int timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
         int sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
+
+        self->lastCaptureTimeMs = currentTimeMs;
         
         if (sleepPeriodMs > 0) {
             [NSThread sleepForTimeInterval:sleepPeriodMs / 1000.0];
