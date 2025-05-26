@@ -7,11 +7,20 @@
 //
 
 #import "RCTGstPlayerController.h"
+#import "ImageCache.h"
+#import <stdatomic.h>
 
 @interface RCTGstPlayerController ()
 {
     RctGstConfiguration *configuration;
     EaglUIView *drawableSurface;
+    
+    atomic_bool runCopyImageThread;
+    dispatch_queue_t imageCaptureQueue;
+    long lastCaptureTimeMs;
+    long captureFps;
+    long capturePeriodMs;
+    UIGraphicsImageRenderer *imageRenderer;
 }
 
 @end
@@ -45,6 +54,14 @@ dispatch_queue_t events_queue;
     self = [super init];
     if (self) {
         c_view = [[RctGstParentView alloc] init];
+        
+
+        atomic_store(&runCopyImageThread, false);
+        captureFps = 30;
+        capturePeriodMs = (1000 / captureFps);
+        lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);;
+
+        imageRenderer = nil;
         
         new_uri = g_malloc(sizeof(gchar));
         
@@ -86,6 +103,47 @@ dispatch_queue_t events_queue;
             [self destroyDrawableSurface];
             [self createDrawableSurface];
         });
+}
+
+
+- (void)threadCopyImageFunc {
+    NSLog(@"Starting image capture thread");
+    while (atomic_load(&runCopyImageThread)) {
+        @autoreleasepool {
+            __block UIImage *image = nil;
+            
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                CGRect bounds = self->drawableSurface.bounds;
+                if (bounds.size.width <= 0 || bounds.size.height <= 0) {
+                    NSLog(@"Surface with invalid size: %f x %f", bounds.size.width, bounds.size.height);
+                    [NSThread sleepForTimeInterval:0.1];
+                    return;
+                }
+
+                if (imageRenderer == nil) {
+                    imageRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size];
+                }
+                
+                image = [imageRenderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
+                    [self->drawableSurface drawViewHierarchyInRect:bounds afterScreenUpdates:NO];
+                }];
+            });
+            
+            if (image) {
+                [[ImageCache getInstance] setImage:image];
+            }
+        }
+        
+        long currentTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);
+        long timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
+        long sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
+
+        self->lastCaptureTimeMs = currentTimeMs;
+        
+        if (sleepPeriodMs > 0) {
+            [NSThread sleepForTimeInterval:sleepPeriodMs / 1000.0];
+        }
+    }
 }
 
 // When the player has inited
@@ -169,6 +227,12 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     // Preparing pipeline
     rct_gst_init(configuration);
     
+    imageCaptureQueue = dispatch_queue_create("com.kalyzee.rctgstplayer.imageCaptureQueue", DISPATCH_QUEUE_SERIAL);
+    atomic_store(&runCopyImageThread, true);
+    dispatch_async(imageCaptureQueue, ^{
+        [self threadCopyImageFunc];
+    });
+    
     // Run pipeline
     if (background_queue != NULL)
         dispatch_async(background_queue, ^{
@@ -179,6 +243,12 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 // Memory management
 - (void)dealloc
 {
+    atomic_store(&runCopyImageThread, false);
+    
+    [[ImageCache getInstance] getImage:YES];
+    
+    imageRenderer = nil;
+    
     rct_gst_terminate();
     g_free(new_uri);
     g_free(source);
