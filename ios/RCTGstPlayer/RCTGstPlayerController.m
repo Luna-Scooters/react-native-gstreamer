@@ -8,17 +8,18 @@
 
 #import "RCTGstPlayerController.h"
 #import "ImageCache.h"
+#import <stdatomic.h>
 
 @interface RCTGstPlayerController ()
 {
     RctGstConfiguration *configuration;
     EaglUIView *drawableSurface;
     
-    BOOL runCopyImageThread;
+    atomic_bool runCopyImageThread;
     dispatch_queue_t imageCaptureQueue;
-    int lastCaptureTimeMs;
-    int captureFps;
-    int capturePeriodMs;
+    long lastCaptureTimeMs;
+    long captureFps;
+    long capturePeriodMs;
     UIGraphicsImageRenderer *imageRenderer;
 }
 
@@ -55,10 +56,10 @@ dispatch_queue_t events_queue;
         c_view = [[RctGstParentView alloc] init];
         
 
-        runCopyImageThread = NO;
+        atomic_store(&runCopyImageThread, false);
         captureFps = 30;
         capturePeriodMs = (1000 / captureFps);
-        lastCaptureTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);;
+        lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);;
 
         imageRenderer = nil;
         
@@ -107,13 +108,14 @@ dispatch_queue_t events_queue;
 
 - (void)threadCopyImageFunc {
     NSLog(@"Starting image capture thread");
-    while (runCopyImageThread) {
+    while (atomic_load(&runCopyImageThread)) {
         @autoreleasepool {
             __block UIImage *image = nil;
             
             dispatch_sync(dispatch_get_main_queue(), ^{
                 CGRect bounds = self->drawableSurface.bounds;
                 if (bounds.size.width <= 0 || bounds.size.height <= 0) {
+                    NSLog(@"Surface with invalid size: %f x %f", bounds.size.width, bounds.size.height);
                     [NSThread sleepForTimeInterval:0.1];
                     return;
                 }
@@ -132,9 +134,9 @@ dispatch_queue_t events_queue;
             }
         }
         
-        int currentTimeMs = (int)([[NSDate date] timeIntervalSince1970] * 1000);
-        int timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
-        int sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
+        long currentTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);
+        long timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
+        long sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
 
         self->lastCaptureTimeMs = currentTimeMs;
         
@@ -226,7 +228,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     rct_gst_init(configuration);
     
     imageCaptureQueue = dispatch_queue_create("com.kalyzee.rctgstplayer.imageCaptureQueue", DISPATCH_QUEUE_SERIAL);
-    runCopyImageThread = YES;
+    atomic_store(&runCopyImageThread, true);
     dispatch_async(imageCaptureQueue, ^{
         [self threadCopyImageFunc];
     });
@@ -241,7 +243,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 // Memory management
 - (void)dealloc
 {
-    runCopyImageThread = NO;
+    atomic_store(&runCopyImageThread, false);
     
     [[ImageCache getInstance] getImage:YES];
     
