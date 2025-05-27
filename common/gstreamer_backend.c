@@ -95,6 +95,16 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
         else
             video_sink = gst_element_factory_make("glimagesink", "video-sink");
         
+        // Configure glimagesink for lower latency
+        if (!rct_gst_get_configuration()->isDebugging) {
+            g_object_set(G_OBJECT(video_sink),
+                        "sync", FALSE,
+                        "async", FALSE,
+                        "qos", TRUE,
+                        "max-lateness", 20 * GST_MSECOND,
+                        NULL);
+        }
+        
         video_overlay = GST_VIDEO_OVERLAY(video_sink);
         gst_video_overlay_prepare_window_handle(video_overlay);
         
