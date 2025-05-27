@@ -373,11 +373,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // Restart QoS Counter once in a while
     g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
-    // Change audio sink with a custom one(Allow volume analysis)
-    if (!rct_gst_get_configuration()->isDebugging) {
-        audio_sink = create_audio_sink();
-        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
-    }
+    // Use fakesink to ignore audio
+    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
