@@ -95,6 +95,16 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
         else
             video_sink = gst_element_factory_make("glimagesink", "video-sink");
         
+        // Configure glimagesink for lower latency
+        if (!rct_gst_get_configuration()->isDebugging) {
+            g_object_set(G_OBJECT(video_sink),
+                        "sync", FALSE,
+                        "async", FALSE,
+                        "qos", TRUE,
+                        "max-lateness", 20 * GST_MSECOND,
+                        NULL);
+        }
+        
         video_overlay = GST_VIDEO_OVERLAY(video_sink);
         gst_video_overlay_prepare_window_handle(video_overlay);
         
@@ -256,8 +266,8 @@ static gboolean restart_stream(gpointer data) {
      return TRUE;
 }
 
-static const guint64 qos_count_max = 100;
-static guint refresh_qos_count_ms = 10000; // 10 seconds
+static const guint64 qos_count_max = 50;
+static guint refresh_qos_count_ms = 5000; // 5 seconds
 static guint64 qos_count = 0;
 static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
 {
@@ -322,14 +332,16 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
     g_object_set(source,
-                "latency", 150, /* 150 ms */
+                "latency", 50, /* 50 ms */
                 "buffer-mode", 0,
                 "drop-on-latency", TRUE,
                 "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
+                "max-ts-offset", 30 * 1000 * 1000, /* 30 ms */
                 "protocols", 0x03, /* UDP + UDP_MCAST */
-                "udp-buffer-size", 5242880, /* 5 MB */
-                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
+                "udp-buffer-size", 2097152, /* 2 MB */
+                "max-rtcp-rtp-time-diff", 100 * 1000 * 1000, /* 100 ms */
+                "do-lost", TRUE, /* Handle lost packets more aggressively */
+                "do-retransmission", TRUE, /* Request retransmission for lost packets */
                 NULL);
 }
 
@@ -350,7 +362,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command;
 
     // Prepare playbin pipeline. If playbin not working, will display an error video signal
-    launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin video-sink=\"queue ! autovideosink sync=false\"" : "videotestsrc ! glimagesink name=video-sink";
+    launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin video-sink=\"queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! autovideosink sync=false\" buffer-duration=500000000 buffer-size=1000000" : "videotestsrc ! glimagesink name=video-sink";
     GError *error = NULL;
     pipeline = gst_parse_launch(launch_command, &error);
     if (error != NULL) {
@@ -373,11 +385,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // Restart QoS Counter once in a while
     g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
-    // Change audio sink with a custom one(Allow volume analysis)
-    if (!rct_gst_get_configuration()->isDebugging) {
-        audio_sink = create_audio_sink();
-        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
-    }
+    // Use fakesink to ignore audio
+    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
