@@ -95,6 +95,16 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
         else
             video_sink = gst_element_factory_make("glimagesink", "video-sink");
         
+        // Configure glimagesink for lower latency
+        if (!rct_gst_get_configuration()->isDebugging) {
+            g_object_set(G_OBJECT(video_sink),
+                        "sync", FALSE,
+                        "async", FALSE,
+                        "qos", TRUE,
+                        "max-lateness", 20 * GST_MSECOND,
+                        NULL);
+        }
+        
         video_overlay = GST_VIDEO_OVERLAY(video_sink);
         gst_video_overlay_prepare_window_handle(video_overlay);
         
@@ -373,11 +383,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // Restart QoS Counter once in a while
     g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
-    // Change audio sink with a custom one(Allow volume analysis)
-    if (!rct_gst_get_configuration()->isDebugging) {
-        audio_sink = create_audio_sink();
-        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
-    }
+    // Use fakesink to ignore audio
+    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
