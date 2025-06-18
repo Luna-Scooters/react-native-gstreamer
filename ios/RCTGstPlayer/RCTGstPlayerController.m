@@ -197,6 +197,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     message = g_strdup(_message);
     debug_info = g_strdup(_debug_info);
     
+    NSLog(@"onElementError: source: %s, message: %s, debug_info: %s", source, message, debug_info);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
             c_view.onElementError(@{
@@ -227,11 +228,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     // Preparing pipeline
     rct_gst_init(configuration);
     
-    imageCaptureQueue = dispatch_queue_create("com.kalyzee.rctgstplayer.imageCaptureQueue", DISPATCH_QUEUE_SERIAL);
-    atomic_store(&runCopyImageThread, true);
-    dispatch_async(imageCaptureQueue, ^{
-        [self threadCopyImageFunc];
-    });
+    [self startImageCaptureThread];
     
     // Run pipeline
     if (background_queue != NULL)
@@ -257,6 +254,51 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 
     if (self->drawableSurface != NULL)
         self->drawableSurface = NULL;
+}
+
+- (void)startImageCaptureThread {
+    NSLog(@"Initializing and starting image capture thread");
+    if (imageCaptureQueue == NULL) {
+        imageCaptureQueue = dispatch_queue_create("RctGstImageCaptureQueue", 0);
+    }
+    
+    if (!atomic_load(&runCopyImageThread)) {
+        atomic_store(&runCopyImageThread, true);
+        dispatch_async(imageCaptureQueue, ^{
+            [self threadCopyImageFunc];
+        });
+    }
+}
+
+- (void)viewWillDisappear:(BOOL)animated
+{
+    [super viewWillDisappear:animated];
+    atomic_store(&runCopyImageThread, false);
+}
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+    
+    // Wait for the image capture thread to finish
+    if (imageCaptureQueue != NULL) {
+        dispatch_sync(imageCaptureQueue, ^{
+            NSLog(@"Image capture thread has completed");
+        });
+    }
+    
+    [[ImageCache getInstance] getImage:YES];
+    
+    imageRenderer = nil;
+}
+
+- (void)viewWillAppear:(BOOL)animated
+{
+    [super viewWillAppear:animated];
+    
+    if (!atomic_load(&runCopyImageThread)) {
+        [self startImageCaptureThread];
+    }
 }
 
 @end
