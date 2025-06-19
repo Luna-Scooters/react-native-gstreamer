@@ -54,6 +54,10 @@ RCT_EXPORT_METHOD(recreateView:(nonnull NSNumber *)reactTag){
 // react-native init
 - (UIView *)view
 {
+    if (self->playerController != nil) {
+        [self->playerController recreateView];
+        return [self->playerController view];
+    }
     // Init GStreamer
     gst_ios_init();
     
