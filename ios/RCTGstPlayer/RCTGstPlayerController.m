@@ -120,7 +120,7 @@ dispatch_queue_t events_queue;
                     return;
                 }
 
-                if (imageRenderer == nil) {
+                if (imageRenderer == nil || !CGSizeEqualToSize(imageRenderer.format.bounds.size, bounds.size)) {
                     imageRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size];
                 }
                 
