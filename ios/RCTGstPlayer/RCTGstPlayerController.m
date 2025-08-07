@@ -78,21 +78,37 @@ dispatch_queue_t events_queue;
     return self->configuration;
 }
 
+// Helper method to ensure UI operations run on main thread
+- (void)runOnMainThreadSync:(void (^)(void))block
+{
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), block);
+    }
+}
+
 // Create a new drawable surface
 - (void) createDrawableSurface
 {
     g_print("createDrawableSurface\n");
-    self->drawableSurface = [DrawableSurfaceFactory getView:self.view];
-    [self.view addSubview:self->drawableSurface];
-    rct_gst_set_drawable_surface([self->drawableSurface getHandle]);
+    
+    [self runOnMainThreadSync:^{
+        self->drawableSurface = [DrawableSurfaceFactory getView:self.view];
+        [self.view addSubview:self->drawableSurface];
+        rct_gst_set_drawable_surface([self->drawableSurface getHandle]);
+    }];
 }
 
 // Destroy an old drawable surface
 - (void) destroyDrawableSurface
 {
-    if (self->drawableSurface) {
-        [self->drawableSurface removeFromSuperview];
-    }
+        [self runOnMainThreadSync:^{
+            if (self->drawableSurface) {
+                [self->drawableSurface removeFromSuperview];
+                self->drawableSurface = nil;
+            }
+        }];
 }
 
 // Destroy and recreate a window
@@ -113,6 +129,11 @@ dispatch_queue_t events_queue;
             __block UIImage *image = nil;
             
             dispatch_sync(dispatch_get_main_queue(), ^{
+                if (self->drawableSurface == nil) {
+                    NSLog(@"Drawable surface is nil, skipping image capture");
+                    return;
+                }
+
                 CGRect bounds = self->drawableSurface.bounds;
                 if (bounds.size.width <= 0 || bounds.size.height <= 0) {
                     NSLog(@"Surface with invalid size: %f x %f", bounds.size.width, bounds.size.height);
