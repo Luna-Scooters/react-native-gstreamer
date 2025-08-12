@@ -91,6 +91,7 @@ dispatch_queue_t events_queue;
 - (void) destroyDrawableSurface
 {
     if (self->drawableSurface) {
+        rct_gst_set_drawable_surface(0);
         [self->drawableSurface removeFromSuperview];
     }
 }
