@@ -150,6 +150,10 @@ dispatch_queue_t events_queue;
 void onInit() {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping onPlayerInit event");
+                return;
+            }
             c_view.onPlayerInit(@{});
         });
 }
@@ -161,6 +165,10 @@ void onStateChanged(GstState old_state, GstState new_state) {
     
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping state change event");
+                return;
+            }
             NSLog(@"mydebug : new_state -> %s (%d -> %d)", gst_element_state_get_name(new_state), oldState, newState);
             c_view.onStateChanged(@{ @"old_state": oldState, @"new_state": newState });
         });
@@ -169,11 +177,15 @@ void onStateChanged(GstState old_state, GstState new_state) {
 void onVolumeChanged(RctGstAudioLevel* audioLevel) {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-        c_view.onVolumeChanged(@{
-                                 @"decay": @(audioLevel->decay),
-                                 @"rms": @(audioLevel->rms),
-                                 @"peak": @(audioLevel->peak),
-                                 });
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping volume change event");
+                return;
+            }
+            c_view.onVolumeChanged(@{
+                                     @"decay": @(audioLevel->decay),
+                                     @"rms": @(audioLevel->rms),
+                                     @"peak": @(audioLevel->peak),
+                                     });
         });
 }
 
@@ -181,13 +193,22 @@ void onUriChanged(gchar* newUri) {
     new_uri = g_strdup(newUri);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-        c_view.onUriChanged(@{ @"new_uri": [NSString stringWithUTF8String:new_uri] });
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping URI change event");
+                return;
+            }
+        
+            c_view.onUriChanged(@{ @"new_uri": [NSString stringWithUTF8String:new_uri] });
         });
 }
 
 void onEOS() {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping EOS event");
+                return;
+            }
             c_view.onEOS(@{});
         });
 }
@@ -200,6 +221,10 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     NSLog(@"onElementError: source: %s, message: %s, debug_info: %s", source, message, debug_info);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
+            if (c_view == nil) {
+                NSLog(@"c_view is nil, skipping element error event");
+                return;
+            }
             c_view.onElementError(@{
                                     @"source": [NSString stringWithUTF8String:source],
                                     @"message": [NSString stringWithUTF8String:message],
