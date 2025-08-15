@@ -28,7 +28,7 @@
 @implementation RCTGstPlayerController
 
 // For access in pure C callbacks
-RctGstParentView *c_view;
+static RCTGstPlayerController *currentInstance = nil;
 
 gchar *new_uri;
 gchar *source, *message, *debug_info;
@@ -42,7 +42,10 @@ dispatch_queue_t events_queue;
 // Generate custom view to return to react-native (for events handle)
 @dynamic view;
 - (void)loadView {
-    self.view = c_view;
+    if (!_view) {
+        _view = [[RctGstParentView alloc] init];
+    }
+    self.view = _view;
 }
 
 - (instancetype)init
@@ -53,7 +56,8 @@ dispatch_queue_t events_queue;
     
     self = [super init];
     if (self) {
-        c_view = [[RctGstParentView alloc] init];
+        _view = [[RctGstParentView alloc] init];
+        currentInstance = self;
         
 
         atomic_store(&runCopyImageThread, false);
@@ -93,6 +97,7 @@ dispatch_queue_t events_queue;
     if (self->drawableSurface) {
         rct_gst_set_drawable_surface(0);
         [self->drawableSurface removeFromSuperview];
+        self->drawableSurface = nil;
     }
 }
 
@@ -151,11 +156,11 @@ dispatch_queue_t events_queue;
 void onInit() {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping onPlayerInit event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping onPlayerInit event");
                 return;
             }
-            c_view.onPlayerInit(@{});
+            currentInstance->_view.onPlayerInit(@{});
         });
 }
 
@@ -166,23 +171,23 @@ void onStateChanged(GstState old_state, GstState new_state) {
     
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping state change event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping state change event");
                 return;
             }
             NSLog(@"mydebug : new_state -> %s (%d -> %d)", gst_element_state_get_name(new_state), oldState, newState);
-            c_view.onStateChanged(@{ @"old_state": oldState, @"new_state": newState });
+            currentInstance->_view.onStateChanged(@{ @"old_state": oldState, @"new_state": newState });
         });
 }
 
 void onVolumeChanged(RctGstAudioLevel* audioLevel) {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping volume change event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping volume change event");
                 return;
             }
-            c_view.onVolumeChanged(@{
+            currentInstance->_view.onVolumeChanged(@{
                                      @"decay": @(audioLevel->decay),
                                      @"rms": @(audioLevel->rms),
                                      @"peak": @(audioLevel->peak),
@@ -194,23 +199,23 @@ void onUriChanged(gchar* newUri) {
     new_uri = g_strdup(newUri);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping URI change event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping URI change event");
                 return;
             }
         
-            c_view.onUriChanged(@{ @"new_uri": [NSString stringWithUTF8String:new_uri] });
+            currentInstance->_view.onUriChanged(@{ @"new_uri": [NSString stringWithUTF8String:new_uri] });
         });
 }
 
 void onEOS() {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping EOS event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping EOS event");
                 return;
             }
-            c_view.onEOS(@{});
+            currentInstance->_view.onEOS(@{});
         });
 }
 
@@ -222,11 +227,11 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     NSLog(@"onElementError: source: %s, message: %s, debug_info: %s", source, message, debug_info);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            if (c_view == nil) {
-                NSLog(@"c_view is nil, skipping element error event");
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping element error event");
                 return;
             }
-            c_view.onElementError(@{
+            currentInstance->_view.onElementError(@{
                                     @"source": [NSString stringWithUTF8String:source],
                                     @"message": [NSString stringWithUTF8String:message],
                                     @"debug_info": [NSString stringWithUTF8String:debug_info]
@@ -267,7 +272,11 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 - (void)dealloc
 {
     atomic_store(&runCopyImageThread, false);
-    
+
+    if (currentInstance == self) {
+        currentInstance = nil;
+    }
+
     [[ImageCache getInstance] getImage:YES];
     
     imageRenderer = nil;
@@ -306,25 +315,10 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 {
     [super viewDidDisappear:animated];
     
-    // Wait for the image capture thread to finish
-    if (imageCaptureQueue != NULL) {
-        dispatch_sync(imageCaptureQueue, ^{
-            NSLog(@"Image capture thread has completed");
-        });
-    }
     
     [[ImageCache getInstance] getImage:YES];
     
     imageRenderer = nil;
-}
-
-- (void)viewWillAppear:(BOOL)animated
-{
-    [super viewWillAppear:animated];
-    
-    if (!atomic_load(&runCopyImageThread)) {
-        [self startImageCaptureThread];
-    }
 }
 
 @end
