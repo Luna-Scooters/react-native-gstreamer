@@ -96,7 +96,15 @@ dispatch_queue_t events_queue;
 {
     if (self->drawableSurface) {
         rct_gst_set_drawable_surface(0);
-        [self->drawableSurface removeFromSuperview];
+        
+        if ([NSThread isMainThread]) {
+            [self->drawableSurface removeFromSuperview];
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                [self->drawableSurface removeFromSuperview];
+            });
+        }
+        
         self->drawableSurface = nil;
     }
 }
@@ -287,8 +295,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     g_free(message);
     g_free(debug_info);
 
-    if (self->drawableSurface != NULL)
-        self->drawableSurface = NULL;
+    [self destroyDrawableSurface];
 }
 
 - (void)startImageCaptureThread {
@@ -309,6 +316,8 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 {
     [super viewWillDisappear:animated];
     atomic_store(&runCopyImageThread, false);
+
+    [self destroyDrawableSurface];
 }
 
 - (void)viewDidDisappear:(BOOL)animated
