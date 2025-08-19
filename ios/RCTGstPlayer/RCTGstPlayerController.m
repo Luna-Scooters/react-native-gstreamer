@@ -116,6 +116,7 @@ dispatch_queue_t events_queue;
         dispatch_async(events_queue, ^{
             [self destroyDrawableSurface];
             [self createDrawableSurface];
+            [self startImageCaptureThread];
         });
 }
 
