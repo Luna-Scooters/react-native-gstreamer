@@ -333,8 +333,8 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 static void cb_source_created(GstElement *pipe, GstElement *source) {
     g_object_set(source,
                 "latency", 150, /* 150 ms */
-                "buffer-mode", 0,
-                "drop-on-latency", TRUE,
+                "buffer-mode", 1, /* Slave receiver to sender clock */
+                "drop-on-latency", FALSE,
                 "ntp-sync", FALSE,
                 "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
                 "protocols", 0x03, /* UDP + UDP_MCAST */
