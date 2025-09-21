@@ -20,7 +20,11 @@
     long lastCaptureTimeMs;
     long captureFps;
     long capturePeriodMs;
-    UIGraphicsImageRenderer *imageRenderer;
+    
+    // Core Graphics context and color space for image capture
+    CGContextRef cgContext;
+    CGColorSpaceRef cgColorSpace;
+    CGSize lastContextSize;
 }
 
 @end
@@ -65,7 +69,9 @@ dispatch_queue_t events_queue;
         capturePeriodMs = (1000 / captureFps);
         lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);;
 
-        imageRenderer = nil;
+        cgContext = NULL;
+        cgColorSpace = NULL;
+        lastContextSize = CGSizeZero;
         
         new_uri = g_malloc(sizeof(gchar));
         
@@ -125,7 +131,7 @@ dispatch_queue_t events_queue;
     NSLog(@"Starting image capture thread");
     while (atomic_load(&runCopyImageThread)) {
         @autoreleasepool {
-            __block UIImage *image = nil;
+            __block CGImageRef image = NULL;
             
             dispatch_sync(dispatch_get_main_queue(), ^{
                 CGRect bounds = self->drawableSurface.bounds;
@@ -135,17 +141,57 @@ dispatch_queue_t events_queue;
                     return;
                 }
 
-                if (imageRenderer == nil || !CGSizeEqualToSize(imageRenderer.format.bounds.size, bounds.size)) {
-                    imageRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:bounds.size];
+                if (self->cgContext == nil || self->cgColorSpace == nil || !CGSizeEqualToSize(self->lastContextSize, bounds.size)) {
+                    NSLog(@"Recreating context for size change");
+                    
+                    // Clean up existing objects if resizing
+                    [self cleanupGraphicsContext];
+                    
+                    // Create color space
+                    self->cgColorSpace = CGColorSpaceCreateDeviceRGB();
+                    if (!self->cgColorSpace) {
+                        NSLog(@"Failed to create color space");
+                        return;
+                    }
+                    
+                    // Create bitmap context
+                    self->cgContext = CGBitmapContextCreate(NULL,
+                                                    (size_t)bounds.size.width,
+                                                    (size_t)bounds.size.height,
+                                                    8,  // 8 bits per component
+                                                    0,  // Let CG calculate bytes per row
+                                                    self->cgColorSpace,
+                                                    kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+                    
+                    if (!self->cgContext) {
+                        NSLog(@"Failed to create bitmap context");
+                        CGColorSpaceRelease(self->cgColorSpace);
+                        self->cgColorSpace = NULL;
+                        return;
+                    }
+                    
+                    // Store the size for future comparisons
+                    self->lastContextSize = bounds.size;
+                    NSLog(@"Successfully created context");
                 }
                 
-                image = [imageRenderer imageWithActions:^(UIGraphicsImageRendererContext * _Nonnull rendererContext) {
+                if (self->cgContext) {
+                    
+                    // Try different rendering approaches
+                    UIGraphicsPushContext(self->cgContext);
+                    
+                    // First try: render the drawable surface directly
                     [self->drawableSurface drawViewHierarchyInRect:bounds afterScreenUpdates:NO];
-                }];
+                    
+                    UIGraphicsPopContext();
+                    
+                    image = CGBitmapContextCreateImage(self->cgContext);
+                }
             });
             
             if (image) {
                 [[ImageCache getInstance] setImage:image];
+                CGImageRelease(image);
             }
         }
         
@@ -288,7 +334,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 
     [[ImageCache getInstance] getImage:YES];
     
-    imageRenderer = nil;
+    [self cleanupGraphicsContext];
     
     rct_gst_terminate();
     g_free(new_uri);
@@ -306,6 +352,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     }
     
     if (!atomic_load(&runCopyImageThread)) {
+        // Reset frame counter when starting capture
         atomic_store(&runCopyImageThread, true);
         dispatch_async(imageCaptureQueue, ^{
             [self threadCopyImageFunc];
@@ -313,10 +360,26 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     }
 }
 
+// Clean up graphics context resources
+- (void)cleanupGraphicsContext {
+    if (cgContext) {
+        CGContextRelease(cgContext);
+        cgContext = NULL;
+    }
+    if (cgColorSpace) {
+        CGColorSpaceRelease(cgColorSpace);
+        cgColorSpace = NULL;
+    }
+    lastContextSize = CGSizeZero;
+}
+
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
     atomic_store(&runCopyImageThread, false);
+    
+    // Clean up graphics context when stopping capture
+    [self cleanupGraphicsContext];
 
     [self destroyDrawableSurface];
 }
@@ -327,8 +390,6 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     
     
     [[ImageCache getInstance] getImage:YES];
-    
-    imageRenderer = nil;
 }
 
 @end

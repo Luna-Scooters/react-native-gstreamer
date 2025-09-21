@@ -7,9 +7,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (instancetype)getInstance;
 
-- (void)setImage:(UIImage *)image;
+- (void)setImage:(CGImageRef)image;
 
-- (UIImage * _Nullable)getImage:(BOOL)evict;
+- (CGImageRef _Nullable)getImage:(BOOL)evict;
 
 @end
 

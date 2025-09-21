@@ -1,7 +1,7 @@
 #import "ImageCache.h"
 
 @implementation ImageCache {
-    NSCache<NSString *, UIImage *> *_imageCache;
+    NSCache<NSString *, NSValue *> *_imageCache;
     NSString *_cacheKey;
 }
 
@@ -26,20 +26,59 @@
     return self;
 }
 
-- (void)setImage:(UIImage *)image {
+- (void)setImage:(CGImageRef)image {
     if (image) {
-        [_imageCache setObject:image forKey:_cacheKey];
+        // Clean up any existing image first
+        [self evictCurrentImage];
+        
+        NSValue *imageValue = [NSValue valueWithPointer:image];
+        [_imageCache setObject:imageValue forKey:_cacheKey];
+        // Retain the image since we're storing it
+        CGImageRetain(image);
     }
 }
 
-- (UIImage *)getImage:(BOOL)evict {
-    UIImage *image = [_imageCache objectForKey:_cacheKey];
-    
-    if (evict && image) {
+// Helper method to clean up existing image
+- (void)evictCurrentImage {
+    NSValue *existingImageValue = [_imageCache objectForKey:_cacheKey];
+    if (existingImageValue) {
+        CGImageRef existingImage = (CGImageRef)[existingImageValue pointerValue];
+        if (existingImage) {
+            CGImageRelease(existingImage);
+        }
         [_imageCache removeObjectForKey:_cacheKey];
+    }
+}
+
+
+- (CGImageRef)getImage:(BOOL)evict {
+    NSValue *imageValue = [_imageCache objectForKey:_cacheKey];
+    CGImageRef image = NULL;
+    
+    if (imageValue) {
+        image = (CGImageRef)[imageValue pointerValue];
+        // Only retain if we're not evicting (caller will own the reference)
+        if (!evict && image) {
+            CGImageRetain(image);
+        }
+    }
+    
+    if (evict && imageValue) {
+        [_imageCache removeObjectForKey:_cacheKey];
+        // Release the cached reference when evicting
+        if (image) {
+            CGImageRelease(image);
+            // Don't return the released image
+            image = NULL;
+        }
     }
     
     return image;
+}
+
+- (void)dealloc {
+    // Clean up any cached image before deallocation
+    [self evictCurrentImage];
 }
 
 @end
