@@ -39,7 +39,12 @@ export default class GstPlayer extends React.Component {
             }
             this.play()
         } else {
-            this.stop()
+            if (Platform.OS === 'ios') {
+                this.pause()
+            }
+            else {
+                this.stop()
+            }
         }
         this.appState = nextAppState
     }
