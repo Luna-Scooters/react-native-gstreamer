@@ -31,7 +31,10 @@ export default class GstPlayer extends React.Component {
     }
 
     appStateChanged = (nextAppState) => {
-        if (this.appState.match(/inactive|background/) && nextAppState === 'active') {
+        if (nextAppState !== 'active') {
+            this.stopImageCapture()
+        }
+        else if (this.appState.match(/inactive|background/)) {
 
             // On iOS we need to recreate video sink to bypass a bug with vtdec when video freezes
             if (Platform.OS === 'ios') {
@@ -130,6 +133,14 @@ export default class GstPlayer extends React.Component {
         this.setGstState(GstState.READY)
     }
 
+    stopImageCapture() {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.stopImageCapture,
+            []
+        )
+    }
+
     // Helper methods
     recreateView() {
         UIManager.dispatchViewManagerCommand(
@@ -183,6 +194,7 @@ GstPlayer.propTypes = {
     play: PropTypes.func,
     pause: PropTypes.func,
     stop: PropTypes.func,
+    stopImageCapture: PropTypes.func,
 
     // Helper methods
     createDrawableSurface: PropTypes.func,

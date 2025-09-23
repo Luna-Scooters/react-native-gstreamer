@@ -60,7 +60,7 @@ dispatch_queue_t events_queue;
         currentInstance = self;
         
 
-        atomic_store(&runCopyImageThread, false);
+        [self stopImageCapture];
         captureFps = 30;
         capturePeriodMs = (1000 / captureFps);
         lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);;
@@ -280,7 +280,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 // Memory management
 - (void)dealloc
 {
-    atomic_store(&runCopyImageThread, false);
+    [self stopImageCapture];
 
     if (currentInstance == self) {
         currentInstance = nil;
@@ -313,10 +313,15 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     }
 }
 
+- (void)stopImageCapture {
+    NSLog(@"Stopping image capture thread");
+    atomic_store(&runCopyImageThread, false);
+}
+
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
-    atomic_store(&runCopyImageThread, false);
+    [self stopImageCapture];
 
     [self destroyDrawableSurface];
 }
