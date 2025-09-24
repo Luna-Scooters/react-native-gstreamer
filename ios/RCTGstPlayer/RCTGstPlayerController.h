@@ -15,5 +15,6 @@
     RctGstParentView *_view;
 }
 - (void) recreateView;
+- (void) stopImageCapture;
 - (RctGstConfiguration *) getConfiguration;
 @end
