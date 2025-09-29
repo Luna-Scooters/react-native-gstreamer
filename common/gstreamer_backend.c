@@ -90,26 +90,39 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     
     if(pipeline)
     {
-        if (rct_gst_get_configuration()->isDebugging)
-            video_sink = gst_bin_get_by_name(pipeline, "video-sink");
-        else
-            video_sink = gst_element_factory_make("glimagesink", "video-sink");
+        // Always try to get the video-sink by name first (works for both debug and rtspsrc pipelines)
+        video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
         
-        // Configure glimagesink for lower latency
-        if (!rct_gst_get_configuration()->isDebugging) {
-            g_object_set(G_OBJECT(video_sink),
-                        "sync", FALSE,
-                        "async", FALSE,
-                        "qos", TRUE,
-                        "max-lateness", 20 * GST_MSECOND,
-                        NULL);
+        if (!video_sink) {
+            // If no named video-sink found, check if this is a playbin pipeline
+            GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+            if (!src_element) {
+                // This is likely a playbin pipeline - create and set glimagesink
+                video_sink = gst_element_factory_make("glimagesink", "video-sink");
+                g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+            } else {
+                gst_object_unref(src_element);
+            }
         }
         
-        video_overlay = GST_VIDEO_OVERLAY(video_sink);
-        gst_video_overlay_prepare_window_handle(video_overlay);
-        
-        if (!rct_gst_get_configuration()->isDebugging)
-            g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+        // Configure the video sink if we have one
+        if (video_sink) {
+            // Configure for lower latency if it's not in debug mode
+            if (!rct_gst_get_configuration()->isDebugging) {
+                g_object_set(G_OBJECT(video_sink),
+                            "sync", FALSE,
+                            "async", FALSE,
+                            "qos", TRUE,
+                            "max-lateness", 20 * GST_MSECOND,
+                            NULL);
+            }
+
+            // Set up video overlay if supported
+            if (GST_IS_VIDEO_OVERLAY(video_sink)) {
+                video_overlay = GST_VIDEO_OVERLAY(video_sink);
+                gst_video_overlay_prepare_window_handle(video_overlay);
+            }
+        }
     }
 }
 
@@ -337,7 +350,7 @@ static void cb_source_created(GstElement *pipe, GstElement *source) {
                 "drop-on-latency", FALSE,
                 "ntp-sync", FALSE,
                 "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x03, /* UDP + UDP_MCAST */
+                "protocols", 0x04, /* TCP */
                 "udp-buffer-size", 5242880, /* 5 MB */
                 "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
                 NULL);
@@ -357,10 +370,23 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 
 void rct_gst_init(RctGstConfiguration *configuration)
 {
-    gchar *launch_command;
+    gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
+    gchar *launch_command_app;
 
-    // Prepare playbin pipeline. If playbin not working, will display an error video signal
-    launch_command = (!rct_gst_get_configuration()->isDebugging) ? "playbin video-sink=\"queue ! autovideosink sync=false\"" : "videotestsrc ! glimagesink name=video-sink";
+    const gchar *decoder_name = "amcviddec-omxgoogleh264decoder";
+    GstElementFactory *factory = gst_element_factory_find(decoder_name);
+    if (factory)
+    {
+        g_print("Hardware Decoder available: [%s]\n", decoder_name);
+        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
+    }
+    else
+    {
+        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
+    }
+
+    // Prepare pipeline. If not working, will display an error video signal
+    gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
     GError *error = NULL;
     pipeline = gst_parse_launch(launch_command, &error);
     if (error != NULL) {
@@ -436,7 +462,18 @@ gchar *rct_gst_get_info()
 void apply_uri()
 {
     rct_gst_set_pipeline_state(GST_STATE_READY);
-    g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
+
+    // Check if this is a rtspsrc pipeline or playbin pipeline
+    GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+    if (src_element) {
+        // This is the rtspsrc pipeline - set location on the rtspsrc element
+        g_object_set(src_element, "location", rct_gst_get_configuration()->uri, NULL);
+        gst_object_unref(src_element);
+    } else {
+        // This is the playbin pipeline - set uri on the pipeline
+        g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
+    }
+
     if (rct_gst_get_configuration()->onUriChanged) {
         rct_gst_get_configuration()->onUriChanged(rct_gst_get_configuration()->uri);
     }
