@@ -91,9 +91,6 @@ void rct_gst_set_debugging(gboolean is_debugging)
  *********************/
 void rct_gst_set_drawable_surface(guintptr _drawableSurface)
 {
-    if(drawable_surface != (guintptr) NULL)
-        drawable_surface = (guintptr) NULL;
-    
     drawable_surface = _drawableSurface;
     
     if(pipeline)
@@ -128,9 +125,7 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // Set up video overlay if supported
             if (GST_IS_VIDEO_OVERLAY(video_sink)) {
                 video_overlay = GST_VIDEO_OVERLAY(video_sink);
-                if (video_overlay) {
-                    gst_video_overlay_prepare_window_handle(video_overlay);
-                }
+                gst_video_overlay_prepare_window_handle(video_overlay);
             }
         }
     }
@@ -171,7 +166,7 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
     if(!gst_is_video_overlay_prepare_window_handle_message(message))
         return GST_BUS_PASS;
     
-    if (video_overlay && drawable_surface != (guintptr) NULL) {
+    if (video_overlay && drawable_surface) {
         gst_video_overlay_set_window_handle(video_overlay, drawable_surface);
     }
     
@@ -449,8 +444,8 @@ void rct_gst_terminate()
     if(video_overlay != NULL)
         gst_object_unref(video_overlay);
     
-    if(drawable_surface != (guintptr) NULL)
-        drawable_surface = (guintptr) NULL;
+    if(drawable_surface)
+        drawable_surface = 0;
     
     rct_gst_set_pipeline_state(GST_STATE_NULL);
     gst_object_unref(pipeline);
@@ -458,6 +453,7 @@ void rct_gst_terminate()
     g_source_remove(bus_watch_id);
     g_main_loop_unref(main_loop);
     
+    g_free(configuration->audioLevelRefreshRate);
     g_free(configuration);
     g_free(audio_level);
     
