@@ -83,8 +83,8 @@ void rct_gst_set_debugging(gboolean is_debugging)
  *********************/
 void rct_gst_set_drawable_surface(guintptr _drawableSurface)
 {
-    if(drawable_surface != NULL)
-        drawable_surface = NULL;
+    if(drawable_surface != (guintptr) NULL)
+        drawable_surface = (guintptr) NULL;
     
     drawable_surface = _drawableSurface;
     
@@ -437,8 +437,8 @@ void rct_gst_terminate()
     if(video_overlay != NULL)
         gst_object_unref(video_overlay);
     
-    if(drawable_surface != NULL)
-        drawable_surface = NULL;
+    if(drawable_surface != (guintptr) NULL)
+        drawable_surface = (guintptr) NULL;
     
     rct_gst_set_pipeline_state(GST_STATE_NULL);
     gst_object_unref(pipeline);
