@@ -35,7 +35,8 @@ RctGstConfiguration *rct_gst_get_configuration()
 {
     if (!configuration) {
         configuration = g_malloc(sizeof(RctGstConfiguration));
-        configuration->audioLevelRefreshRate = 100;
+        configuration->audioLevelRefreshRate = g_malloc(sizeof(gint));
+        *(configuration->audioLevelRefreshRate) = 100;
         configuration->uri = NULL;
         configuration->isDebugging = FALSE;
         
@@ -46,6 +47,7 @@ RctGstConfiguration *rct_gst_get_configuration()
         
         configuration->onInit = NULL;
         configuration->onEOS = NULL;
+        configuration->initialDrawableSurface = 0;
     }
     return configuration;
 }
@@ -53,7 +55,7 @@ RctGstConfiguration *rct_gst_get_configuration()
 RctGstAudioLevel *rct_gst_get_audio_level()
 {
     if (!audio_level) {
-        audio_level = g_malloc(sizeof(RctGstAudioLevel));
+        audio_level = g_malloc0(sizeof(RctGstAudioLevel));
     }
     return audio_level;
 }
@@ -68,8 +70,14 @@ void rct_gst_set_uri(gchar* _uri)
 
 void rct_gst_set_audio_level_refresh_rate(gint audio_level_refresh_rate)
 {
-    rct_gst_get_configuration()->audioLevelRefreshRate = audio_level_refresh_rate;
-    g_object_set(audio_level_element, "interval", audio_level_refresh_rate * 1000000, NULL);
+    if (rct_gst_get_configuration()->audioLevelRefreshRate == NULL) {
+        rct_gst_get_configuration()->audioLevelRefreshRate = g_malloc(sizeof(gint));
+    }
+    *(rct_gst_get_configuration()->audioLevelRefreshRate) = audio_level_refresh_rate;
+
+    if (audio_level_element) {
+        g_object_set(audio_level_element, "interval", audio_level_refresh_rate * 1000000, NULL);
+    }
 }
 
 void rct_gst_set_debugging(gboolean is_debugging)
@@ -120,7 +128,9 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // Set up video overlay if supported
             if (GST_IS_VIDEO_OVERLAY(video_sink)) {
                 video_overlay = GST_VIDEO_OVERLAY(video_sink);
-                gst_video_overlay_prepare_window_handle(video_overlay);
+                if (video_overlay) {
+                    gst_video_overlay_prepare_window_handle(video_overlay);
+                }
             }
         }
     }
@@ -161,7 +171,9 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
     if(!gst_is_video_overlay_prepare_window_handle_message(message))
         return GST_BUS_PASS;
     
-    gst_video_overlay_set_window_handle(video_overlay, drawable_surface);
+    if (video_overlay && drawable_surface != (guintptr) NULL) {
+        gst_video_overlay_set_window_handle(video_overlay, drawable_surface);
+    }
     
     gst_message_unref(message);
     return GST_BUS_DROP;
