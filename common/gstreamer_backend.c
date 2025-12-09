@@ -116,7 +116,7 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             if (!rct_gst_get_configuration()->isDebugging) {
                 g_object_set(G_OBJECT(video_sink),
                             "sync", FALSE,
-                            "async", FALSE,
+                            "async", TRUE,
                             "qos", TRUE,
                             "max-lateness", 20 * GST_MSECOND,
                             NULL);
