@@ -385,11 +385,11 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (factory)
     {
         g_print("Hardware Decoder available: [%s]\n", decoder_name);
-        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
+        launch_command_app = "rtspsrc2 name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
     }
     else
     {
-        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
+        launch_command_app = "playbin3 video-sink=\"queue ! autovideosink sync=false\"";
     }
 
     // Prepare pipeline. If not working, will display an error video signal
