@@ -1,5 +1,5 @@
 import React from 'react'
-import { requireNativeComponent, Text, View, UIManager, findNodeHandle, AppState, Platform } from 'react-native'
+import { requireNativeComponent, UIManager, findNodeHandle, AppState, Platform } from 'react-native'
 
 const PropTypes = require('prop-types')
 
@@ -199,11 +199,7 @@ GstPlayer.propTypes = {
     // Helper methods
     createDrawableSurface: PropTypes.func,
     destroyDrawableSurface: PropTypes.func,
-    recreateView: PropTypes.func,
-
-    ...View.propTypes
+    recreateView: PropTypes.func
 }
 
-const RCTGstPlayer = requireNativeComponent('RCTGstPlayer', GstPlayer, {
-    nativeOnly: { onChange: true }
-})
+const RCTGstPlayer = requireNativeComponent('RCTGstPlayer')

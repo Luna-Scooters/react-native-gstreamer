@@ -1,33 +1,33 @@
 {
-    "name": "react-native-gstreamer",
-    "version": "3.1.14",
-    "description": "react-native-gstreamer is a generic video player for iOS and Android using GStreamer API.",
-    "main": "index.js",
-    "readmeFilename": "README.md",
-    "scripts": {
-        "test": "echo \"Error: no test specified\" && exit 1"
-    },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/Kalyzee/react-native-gstreamer.git"
-    },
-    "keywords": [
-        "react-native",
-        "gstreamer",
-        "video",
-        "audio",
-        "player",
-        "iOS",
-        "Android"
-    ],
-    "author": "Alann Sapone (Kalyzée)",
-    "license": "GPL-3.0",
-    "bugs": {
-        "url": "https://github.com/Kalyzee/react-native-gstreamer/issues"
-    },
-    "homepage": "https://github.com/Kalyzee/react-native-gstreamer#readme",
-    "peerDependencies": {
-        "react": "16.0.0",
-        "prop-types": "^15.6.0"
-    }
+  "name": "react-native-gstreamer",
+  "version": "4.0.0",
+  "description": "react-native-gstreamer is a generic video player for iOS and Android using GStreamer API.",
+  "main": "index.js",
+  "readmeFilename": "README.md",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kalyzee/react-native-gstreamer.git"
+  },
+  "keywords": [
+    "react-native",
+    "gstreamer",
+    "video",
+    "audio",
+    "player",
+    "iOS",
+    "Android"
+  ],
+  "author": "Alann Sapone (Kalyzée)",
+  "license": "GPL-3.0",
+  "bugs": {
+    "url": "https://github.com/Kalyzee/react-native-gstreamer/issues"
+  },
+  "homepage": "https://github.com/Kalyzee/react-native-gstreamer#readme",
+  "peerDependencies": {
+    "react": "19.0.0",
+    "prop-types": "^15.6.0"
+  }
 }
