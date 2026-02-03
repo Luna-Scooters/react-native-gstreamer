@@ -20,8 +20,11 @@ android {
                 if (gstRoot == null)
                     throw new GradleException('GSTREAMER_ROOT_ANDROID must be set, or "gstAndroidRoot" must be defined in your gradle.properties in the top level directory of the unpacked universal GStreamer Android binaries')
 
-         
-                arguments "NDK_APPLICATION_MK=src/main/jni/Application.mk", "GSTREAMER_JAVA_SRC_DIR=src/main/java", "GSTREAMER_ROOT_ANDROID=$gstRoot", "GSTREAMER_ASSETS_DIR=src/main/assets"
+                // Absolute paths so ndk-build works when NDK_PROJECT_PATH=null (AGP/NDK 27+, e.g. GitHub Actions)
+                def appMk = file('src/main/jni/Application.mk').absolutePath
+                def javaSrcDir = file('src/main/java').absolutePath
+                def assetsDir = file('src/main/assets').absolutePath
+                arguments "NDK_APPLICATION_MK=$appMk", "GSTREAMER_JAVA_SRC_DIR=$javaSrcDir", "GSTREAMER_ROOT_ANDROID=$gstRoot", "GSTREAMER_ASSETS_DIR=$assetsDir"
 
                 targets "rctgstplayer"
 
