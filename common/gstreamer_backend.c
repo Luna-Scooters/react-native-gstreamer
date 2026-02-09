@@ -115,8 +115,6 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // Configure for lower latency if it's not in debug mode
             if (!rct_gst_get_configuration()->isDebugging) {
                 g_object_set(G_OBJECT(video_sink),
-                            "sync", FALSE,
-                            "async", TRUE,
                             "qos", TRUE,
                             "max-lateness", 20 * GST_MSECOND,
                             NULL);
@@ -286,35 +284,6 @@ static gboolean restart_stream(gpointer data) {
      return TRUE;
 }
 
-static const guint64 qos_count_max = 100;
-static guint refresh_qos_count_ms = 10000; // 10 seconds
-static guint64 qos_count = 0;
-static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
-{
-    // Show element name
-    const GstStructure *s = gst_message_get_structure(message);
-    if (s) {
-        const gchar *element = gst_element_get_name(GST_MESSAGE_SRC(message));
-        g_print("QoS event from element: %s\n", element);
-    }
-
-    // Increment the QoS counter
-    qos_count++;
-    if (qos_count >= qos_count_max) {
-        g_print("QoS counter reached maximum: %lu\n", qos_count);
-        // Reset the counter
-        qos_count = 0;
-        restart_stream(user_data);
-    }
-
-    return TRUE;
-}
-
-static gboolean cb_reset_qos_counter(gpointer data) {
-    qos_count = 0;
-    return TRUE;
-}
-
 static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_data)
 {
     switch (GST_MESSAGE_TYPE(message))
@@ -339,28 +308,11 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
             cb_async_done(bus, message, user_data);
             break;
             
-        case GST_MESSAGE_QOS:
-            cb_qos(bus, message, user_data);
-            break;
-
         default:
             break;
     }
     
     return TRUE;
-}
-
-static void cb_source_created(GstElement *pipe, GstElement *source) {
-    g_object_set(source,
-                "latency", 150, /* 150 ms */
-                "buffer-mode", 1, /* Slave receiver to sender clock */
-                "drop-on-latency", FALSE,
-                "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x04, /* TCP */
-                "udp-buffer-size", 5242880, /* 5 MB */
-                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
-                NULL);
 }
 
 /*************
@@ -380,17 +332,47 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
-    const gchar *decoder_name = "amcviddec-omxgoogleh264decoder";
-    GstElementFactory *factory = gst_element_factory_find(decoder_name);
-    if (factory)
-    {
-        g_print("Hardware Decoder available: [%s]\n", decoder_name);
-        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
+    // List of Android JPEG decoders
+    const gchar *decoders_list[] = {
+        "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
+        "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
+        "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
+        "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
+        "amcviddec",                          // Generic Android Media Codec
+        "jpegdec",                            // Software decoder (fallback)
+        NULL
+    };
+
+    const gchar *selected_decoder = NULL;
+
+    // Test each jpeg decoder
+    GstElementFactory *factory = NULL;
+    for (int i = 0; decoders_list[i] != NULL; i++) {
+        factory = gst_element_factory_find(decoders_list[i]);
+        if (factory) {
+            selected_decoder = decoders_list[i];
+            gst_object_unref(factory);
+            break;
+        }
     }
-    else
-    {
-        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
+
+    // Build pipeline with selected decoder or fallback to software decoder
+    if (selected_decoder) {
+        g_print("Using JPEG decoder: [%s]\n", selected_decoder);
+    } else {
+        selected_decoder = "jpegdec";
+        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
     }
+    gchar *pipeline_template =
+        "rtspsrc is-live=true protocols=tcp latency=0 name=src "
+        "! rtpjpegdepay "
+        "! jpegparse "
+        "! %s "
+        "! videorate drop-out-of-segment=true "
+        "! video/x-raw,framerate=10/1 "
+        "! videoconvert "
+        "! glimagesink sync=false name=video-sink";
+    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -410,11 +392,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
-
-    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
-
-    // Restart QoS Counter once in a while
-    g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
     // Use fakesink to ignore audio
     audio_sink = gst_element_factory_make("fakesink", "audio-sink");
