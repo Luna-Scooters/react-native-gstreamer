@@ -330,15 +330,49 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
-    gchar *launch_command_app =
+    gchar *launch_command_app;
+
+    // List of Android JPEG decoders
+    const gchar *decoders_list[] = {
+        "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
+        "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
+        "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
+        "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
+        "amcviddec",                          // Generic Android Media Codec
+        "jpegdec",                            // Software decoder (fallback)
+        NULL
+    };
+
+    const gchar *selected_decoder = NULL;
+
+    // Test each jpeg decoder
+    GstElementFactory *factory = NULL;
+    for (int i = 0; decoders_list[i] != NULL; i++) {
+        factory = gst_element_factory_find(decoders_list[i]);
+        if (factory) {
+            selected_decoder = decoders_list[i];
+            gst_object_unref(factory);
+            break;
+        }
+    }
+
+    // Build pipeline with selected decoder or fallback to software decoder
+    if (selected_decoder) {
+        g_print("Using JPEG decoder: [%s]\n", selected_decoder);
+    } else {
+        selected_decoder = "jpegdec";
+        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
+    }
+    gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjpegdepay "
         "! jpegparse "
-        "! jpegdec "
-        "! videorate "
+        "! %s "
+        "! videorate drop-out-of-segment=true "
         "! video/x-raw,framerate=10/1 "
         "! videoconvert "
         "! glimagesink sync=false name=video-sink";
+    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
