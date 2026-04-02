@@ -23,6 +23,9 @@ GstBus *bus;
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
 
+// Startup timing
+static gint64 pipeline_start_time_us = 0;
+
 // Audio
 GstElement* audio_level_element;
 
@@ -207,6 +210,14 @@ static void cb_state_changed(GstBus *bus, GstMessage *msg, gpointer *user_data)
     // Only pay attention to messages coming from the pipeline, not its children
     if(GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline))
     {
+        // Measure time from rct_gst_init to first PLAYING state
+        if (new_state == GST_STATE_PLAYING && pipeline_start_time_us != 0) {
+            gint64 elapsed_us = g_get_monotonic_time() - pipeline_start_time_us;
+            g_print("[startup] Pipeline reached PLAYING in %.1f ms\n",
+                    elapsed_us / 1000.0);
+            pipeline_start_time_us = 0;
+        }
+
         if (rct_gst_get_configuration()->onStateChanged) {
             rct_gst_get_configuration()->onStateChanged(old_state, new_state);
         }
@@ -274,6 +285,9 @@ static gboolean restart_stream(gpointer data) {
 
      // Stop the stream
      gst_element_set_state(pipeline, GST_STATE_NULL);
+
+     // Record restart time so startup measurement covers the recovery path too
+     pipeline_start_time_us = g_get_monotonic_time();
 
      // Restart it
      GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
@@ -377,6 +391,8 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 
 void rct_gst_init(RctGstConfiguration *configuration)
 {
+    pipeline_start_time_us = g_get_monotonic_time();
+
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
