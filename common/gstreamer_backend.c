@@ -125,7 +125,13 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // Set up video overlay if supported
             if (GST_IS_VIDEO_OVERLAY(video_sink)) {
                 video_overlay = GST_VIDEO_OVERLAY(video_sink);
-                gst_video_overlay_prepare_window_handle(video_overlay);
+
+                if (drawable_surface) {
+                    gst_video_overlay_prepare_window_handle(video_overlay);
+                } else {
+                    g_printerr("Setting drawable surface to 0, video will not be displayed\n");
+                    gst_video_overlay_set_window_handle(video_overlay, 0);
+                }
             }
         }
     }

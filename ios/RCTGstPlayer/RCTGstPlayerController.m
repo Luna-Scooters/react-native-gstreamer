@@ -95,6 +95,7 @@ dispatch_queue_t events_queue;
 - (void) destroyDrawableSurface
 {
     if (self->drawableSurface) {
+        rct_gst_set_pipeline_state(GST_STATE_PAUSED);
         rct_gst_set_drawable_surface(0);
         
         if ([NSThread isMainThread]) {
