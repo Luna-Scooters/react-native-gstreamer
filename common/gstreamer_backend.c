@@ -26,6 +26,16 @@ GstVideoOverlay* video_overlay;
 // Startup timing
 static gint64 pipeline_start_time_us = 0;
 
+// QoS rate tracking (rolling average over recent windows)
+#define QOS_WINDOW_COUNT 5
+static guint64 qos_window_counts[QOS_WINDOW_COUNT] = {0};
+static guint   qos_window_index  = 0;
+static guint64 qos_window_current = 0;
+
+// End-to-end latency (derived from QoS running-time vs jitter reported by sink)
+static guint64 e2e_latency_sum_us = 0;
+static guint64 e2e_latency_samples = 0;
+
 // Audio
 GstElement* audio_level_element;
 
@@ -312,8 +322,30 @@ static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
         g_print("QoS event from element: %s\n", element);
     }
 
-    // Increment the QoS counter
+    // Increment counters
     qos_count++;
+    qos_window_current++;
+
+    // --- End-to-end latency from QoS message fields ---
+    // jitter = (render_time - expected_render_time): positive means late (lag).
+    // running_time is when the buffer was timestamped at the source.
+    // The wall-clock time the buffer was actually rendered is approximately
+    // running_time + jitter, so e2e latency = clock_time - running_time.
+    // GstQOSMessage gives us: timestamp (running_time of the buffer) and
+    // jitter (signed, ns). We use |jitter| as a direct lag indicator since
+    // clock_time is not directly accessible here without the pipeline clock.
+    gboolean is_upstream;
+    GstClockTimeDiff jitter;
+    gdouble proportion;
+    GstClockTime timestamp;
+    gst_message_parse_qos(message, &is_upstream, &timestamp, NULL, NULL, NULL);
+    gst_message_parse_qos_values(message, &jitter, &proportion, NULL);
+
+    if (jitter > 0 && GST_CLOCK_TIME_IS_VALID(timestamp)) {
+        e2e_latency_sum_us += (guint64)(jitter / 1000);
+        e2e_latency_samples++;
+    }
+
     if (qos_count >= qos_count_max) {
         g_print("QoS counter reached maximum: %lu\n", qos_count);
         // Reset the counter
@@ -325,7 +357,29 @@ static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
 }
 
 static gboolean cb_reset_qos_counter(gpointer data) {
+    // Rotate the rolling window
+    qos_window_index = (qos_window_index + 1) % QOS_WINDOW_COUNT;
+    qos_window_counts[qos_window_index] = qos_window_current;
+    qos_window_current = 0;
     qos_count = 0;
+
+    // Compute rolling average across all windows
+    guint64 total = 0;
+    for (guint i = 0; i < QOS_WINDOW_COUNT; i++)
+        total += qos_window_counts[i];
+    gdouble avg_per_window = total / (gdouble)QOS_WINDOW_COUNT;
+    g_print("[qos] avg %.1f events/%us window\n",
+            avg_per_window, refresh_qos_count_ms / 1000);
+
+    // Log end-to-end lag average if we have samples
+    if (e2e_latency_samples > 0) {
+        gdouble avg_lag_ms = (e2e_latency_sum_us / (gdouble)e2e_latency_samples) / 1000.0;
+        g_print("[latency] avg render lag %.1f ms over %" G_GUINT64_FORMAT " late frames\n",
+                avg_lag_ms, e2e_latency_samples);
+        e2e_latency_sum_us = 0;
+        e2e_latency_samples = 0;
+    }
+
     return TRUE;
 }
 
