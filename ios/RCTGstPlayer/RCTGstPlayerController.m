@@ -291,13 +291,13 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     
     imageRenderer = nil;
     
+    [self destroyDrawableSurface];
+
     rct_gst_terminate();
     g_free(new_uri);
     g_free(source);
     g_free(message);
     g_free(debug_info);
-
-    [self destroyDrawableSurface];
 }
 
 - (void)startImageCaptureThread {
