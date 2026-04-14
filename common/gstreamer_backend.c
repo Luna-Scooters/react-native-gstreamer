@@ -30,6 +30,8 @@ GstElement* audio_level_element;
 GstElement *video_sink;
 GstElement *audio_sink;
 
+static gboolean apply_uri(gpointer data);
+
 // Getters
 RctGstConfiguration *rct_gst_get_configuration()
 {
@@ -65,7 +67,7 @@ void rct_gst_set_uri(gchar* _uri)
 {
     rct_gst_get_configuration()->uri = _uri;
     if (pipeline)
-        apply_uri();
+        g_idle_add(apply_uri, NULL);
 }
 
 void rct_gst_set_audio_level_refresh_rate(gint audio_level_refresh_rate)
@@ -129,7 +131,7 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
                 if (drawable_surface) {
                     gst_video_overlay_prepare_window_handle(video_overlay);
                 } else {
-                    g_printerr("Setting drawable surface to 0, video will not be displayed\n");
+                    g_print("Setting drawable surface to 0, video will not be displayed\n");
                     gst_video_overlay_set_window_handle(video_overlay, 0);
                 }
             }
@@ -426,9 +428,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     audio_sink = gst_element_factory_make("fakesink", "audio-sink");
     g_object_set(pipeline, "audio-sink", audio_sink, NULL);
 
-    // Apply URI
+    // Apply URI on the GLib main loop thread to avoid blocking the caller.
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
-        apply_uri();
+        g_idle_add(apply_uri, NULL);
     
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();
@@ -473,8 +475,9 @@ gchar *rct_gst_get_info()
     return gst_version_string();
 }
 
-void apply_uri()
+static gboolean apply_uri(gpointer data)
 {
+    (void)data;
     rct_gst_set_pipeline_state(GST_STATE_READY);
 
     // Check if this is a rtspsrc pipeline or playbin pipeline
@@ -491,4 +494,6 @@ void apply_uri()
     if (rct_gst_get_configuration()->onUriChanged) {
         rct_gst_get_configuration()->onUriChanged(rct_gst_get_configuration()->uri);
     }
+
+    return G_SOURCE_REMOVE;
 }

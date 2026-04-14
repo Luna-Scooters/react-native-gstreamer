@@ -55,6 +55,5 @@ void rct_gst_run_loop();
 void rct_gst_terminate();
 
 gchar *rct_gst_get_info();
-void apply_uri();
 
 #endif /* gstreamer_backend_h */
