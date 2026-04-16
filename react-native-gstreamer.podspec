@@ -18,7 +18,11 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 arm64',
-    'HEADER_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Headers"'
+    'HEADER_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Headers"',
+    'DEBUG_INFORMATION_FORMAT' => 'dwarf-with-dsym',
+    'GCC_GENERATE_DEBUGGING_SYMBOLS' => 'YES',
+    'COPY_PHASE_STRIP' => 'NO',
+    'STRIP_INSTALLED_PRODUCT' => 'NO'
   }
 
   # Properly specify architecture requirements
