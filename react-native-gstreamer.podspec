@@ -18,13 +18,8 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 arm64',
-    'HEADER_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Headers"',
-    'LD_RUNPATH_SEARCH_PATHS' => ['"${HOME}/Library/Developer/GStreamer/iPhone.sdk"', '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Libraries"'],
-    'OTHER_LDFLAGS' => '" -L${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Libraries -F${HOME}/Library/Developer/GStreamer/iPhone.sdk -framework GStreamer "'
+    'HEADER_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Headers"'
   }
-  
-  s.vendored_frameworks = "GStreamer.framework" 
-  s.xcconfig = { 'FRAMEWORK_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk"' }
 
   # Properly specify architecture requirements
   s.user_target_xcconfig = { 'VALID_ARCHS' => 'arm64' }
