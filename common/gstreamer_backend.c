@@ -65,9 +65,10 @@ RctGstAudioLevel *rct_gst_get_audio_level()
 // Setters
 void rct_gst_set_uri(gchar* _uri)
 {
-    rct_gst_get_configuration()->uri = _uri;
+    g_free(rct_gst_get_configuration()->uri);
+    rct_gst_get_configuration()->uri = g_strdup(_uri);
     if (pipeline)
-        g_idle_add(apply_uri, NULL);
+        g_idle_add(apply_uri, g_strdup(_uri));
 }
 
 void rct_gst_set_audio_level_refresh_rate(gint audio_level_refresh_rate)
@@ -430,7 +431,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
 
     // Apply URI on the GLib main loop thread to avoid blocking the caller.
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
-        g_idle_add(apply_uri, NULL);
+        g_idle_add(apply_uri, g_strdup(rct_gst_get_configuration()->uri));
     
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();
@@ -449,11 +450,9 @@ void rct_gst_terminate()
     if(video_sink != NULL)
         gst_object_unref(video_sink);
     
-    if(video_overlay != NULL)
-        gst_object_unref(video_overlay);
-    
-    if(drawable_surface)
-        drawable_surface = 0;
+    video_sink = NULL;
+    video_overlay = NULL;
+    drawable_surface = 0;
     
     rct_gst_set_pipeline_state(GST_STATE_NULL);
     gst_object_unref(pipeline);
@@ -461,6 +460,7 @@ void rct_gst_terminate()
     g_source_remove(bus_watch_id);
     g_main_loop_unref(main_loop);
     
+    g_free(configuration->uri);
     g_free(configuration->audioLevelRefreshRate);
     g_free(configuration);
     g_free(audio_level);
@@ -477,23 +477,24 @@ gchar *rct_gst_get_info()
 
 static gboolean apply_uri(gpointer data)
 {
-    (void)data;
+    gchar *uri = (gchar *)data;
     rct_gst_set_pipeline_state(GST_STATE_READY);
 
     // Check if this is a rtspsrc pipeline or playbin pipeline
     GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
     if (src_element) {
         // This is the rtspsrc pipeline - set location on the rtspsrc element
-        g_object_set(src_element, "location", rct_gst_get_configuration()->uri, NULL);
+        g_object_set(src_element, "location", uri, NULL);
         gst_object_unref(src_element);
     } else {
         // This is the playbin pipeline - set uri on the pipeline
-        g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
+        g_object_set(pipeline, "uri", uri, NULL);
     }
 
     if (rct_gst_get_configuration()->onUriChanged) {
-        rct_gst_get_configuration()->onUriChanged(rct_gst_get_configuration()->uri);
+        rct_gst_get_configuration()->onUriChanged(uri);
     }
 
+    g_free(uri);
     return G_SOURCE_REMOVE;
 }
