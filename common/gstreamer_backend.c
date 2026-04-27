@@ -98,6 +98,13 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     
     if(pipeline)
     {
+        // Release previous ref before acquiring a new one
+        if (video_sink) {
+            gst_object_unref(video_sink);
+            video_sink = NULL;
+            video_overlay = NULL;
+        }
+
         // Always try to get the video-sink by name first (works for both debug and rtspsrc pipelines)
         video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
         
@@ -458,7 +465,13 @@ void rct_gst_terminate()
     gst_object_unref(pipeline);
     
     g_source_remove(bus_watch_id);
-    g_main_loop_unref(main_loop);
+
+    // Quit the main loop so rct_gst_run_loop returns
+    if (main_loop) {
+        g_main_loop_quit(main_loop);
+        g_main_loop_unref(main_loop);
+        main_loop = NULL;
+    }
     
     g_free(configuration->uri);
     g_free(configuration->audioLevelRefreshRate);
