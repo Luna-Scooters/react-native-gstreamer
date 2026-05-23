@@ -382,19 +382,15 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
-    gchar *launch_command_app;
 
-    const gchar *decoder_name = "amcviddec-omxgoogleh264decoder";
-    GstElementFactory *factory = gst_element_factory_find(decoder_name);
-    if (factory)
-    {
-        g_print("Hardware Decoder available: [%s]\n", decoder_name);
-        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
-    }
-    else
-    {
-        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
-    }
+    /* Single pipeline using decodebin3 which auto-plugs the best-ranked H.264
+     * decoder available on the device. GStreamer 1.28 reranks Android HW
+     * decoders via MediaCodecInfo.isHardwareAccelerated(), so we no longer
+     * need to hand-pick (and mis-identify) amcviddec-* variants. */
+    gchar *launch_command_app =
+        "rtspsrc name=src is-live=true ! "
+        "rtph264depay ! h264parse ! decodebin3 ! "
+        "glimagesink sync=false qos=false name=video-sink";
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
