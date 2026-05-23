@@ -351,13 +351,17 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 }
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
+    /* Allow UDP, UDP-multicast and TCP (in that priority order) so we can
+     * benefit from lower-latency UDP when the network allows it, and fall
+     * back to TCP otherwise. GStreamer 1.28 also sends RTSP keepalives over
+     * TCP/interleaved, improving reliability with picky cameras. */
     g_object_set(source,
                 "latency", 150, /* 150 ms */
                 "buffer-mode", 1, /* Slave receiver to sender clock */
                 "drop-on-latency", FALSE,
                 "ntp-sync", FALSE,
                 "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x04, /* TCP */
+                "protocols", 0x07, /* UDP | UDP-multicast | TCP */
                 "udp-buffer-size", 5242880, /* 5 MB */
                 "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
                 NULL);
