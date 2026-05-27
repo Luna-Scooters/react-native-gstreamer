@@ -30,6 +30,12 @@ GstElement* audio_level_element;
 GstElement *video_sink;
 GstElement *audio_sink;
 
+// RTSP dual-branch selector state
+GstElement *video_selector;
+GstPad *video_selector_jpeg_pad;
+GstPad *video_selector_h264_pad;
+gboolean video_selector_locked;
+
 // Getters
 RctGstConfiguration *rct_gst_get_configuration()
 {
@@ -315,6 +321,36 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
     return TRUE;
 }
 
+static void select_video_branch(GstPad *selector_pad, const gchar *branch_name)
+{
+    if (video_selector_locked || video_selector == NULL || selector_pad == NULL)
+        return;
+
+    g_object_set(video_selector, "active-pad", selector_pad, NULL);
+    video_selector_locked = TRUE;
+    g_print("Active video branch selected : [%s]\n", branch_name);
+}
+
+static GstPadProbeReturn cb_probe_jpeg_branch(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) {
+        select_video_branch(video_selector_jpeg_pad, "JPEG");
+        return GST_PAD_PROBE_REMOVE;
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
+static GstPadProbeReturn cb_probe_h264_branch(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) {
+        select_video_branch(video_selector_h264_pad, "H264");
+        return GST_PAD_PROBE_REMOVE;
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
 /*************
  OTHER METHODS
  ************/
@@ -333,7 +369,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command_app;
 
     // List of Android JPEG decoders
-    const gchar *decoders_list[] = {
+    const gchar *jpeg_decoders_list[] = {
         "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
         "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
         "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
@@ -343,46 +379,125 @@ void rct_gst_init(RctGstConfiguration *configuration)
         NULL
     };
 
-    const gchar *selected_decoder = NULL;
+    // Prefer hardware H264 decoders, fallback to decodebin for broader compatibility.
+    const gchar *h264_decoders_list[] = {
+        "amcviddec-omxgoogleh264decoder",     // Google OMX decoder
+        "amcviddec-c2googleh264decoder",      // Codec 2.0 Google decoder
+        "amcviddec-omxqcomvideodecoderavc",   // Qualcomm OMX decoder
+        "amcviddec-qcomvideodecoderavc",      // Qualcomm decoder
+        "avdec_h264",                         // Software decoder
+        "decodebin",                          // Generic fallback decoder
+        NULL
+    };
 
-    // Test each jpeg decoder
+    const gchar *selected_jpeg_decoder = NULL;
+    const gchar *selected_h264_decoder = NULL;
+
+    // Test each JPEG decoder
     GstElementFactory *factory = NULL;
-    for (int i = 0; decoders_list[i] != NULL; i++) {
-        factory = gst_element_factory_find(decoders_list[i]);
+    for (int i = 0; jpeg_decoders_list[i] != NULL; i++) {
+        factory = gst_element_factory_find(jpeg_decoders_list[i]);
         if (factory) {
-            selected_decoder = decoders_list[i];
+            selected_jpeg_decoder = jpeg_decoders_list[i];
+            gst_object_unref(factory);
+            break;
+        }
+    }
+
+    // Test each H264 decoder
+    for (int i = 0; h264_decoders_list[i] != NULL; i++) {
+        factory = gst_element_factory_find(h264_decoders_list[i]);
+        if (factory) {
+            selected_h264_decoder = h264_decoders_list[i];
             gst_object_unref(factory);
             break;
         }
     }
 
     // Build pipeline with selected decoder or fallback to software decoder
-    if (selected_decoder) {
-        g_print("Using JPEG decoder: [%s]\n", selected_decoder);
+    if (selected_jpeg_decoder) {
+        g_print("Using JPEG decoder: [%s]\n", selected_jpeg_decoder);
     } else {
-        selected_decoder = "jpegdec";
-        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
+        selected_jpeg_decoder = "jpegdec";
+        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_jpeg_decoder);
     }
+
+    if (selected_h264_decoder) {
+        g_print("Using H264 decoder: [%s]\n", selected_h264_decoder);
+    } else {
+        selected_h264_decoder = "decodebin";
+        g_print("No H264 decoder found, forcing fallback decoder: [%s]\n", selected_h264_decoder);
+    }
+
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
-        "! rtpjpegdepay "
-        "! jpegparse "
-        "! %s "
+        "input-selector name=video-selector sync-mode=clock cache-buffers=false "
         "! videorate drop-out-of-segment=true "
         "! video/x-raw,framerate=10/1 "
         "! videoconvert "
-        "! glimagesink sync=false name=video-sink";
-    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
+        "! glimagesink sync=false name=video-sink "
+        "src. ! application/x-rtp,media=video,encoding-name=JPEG "
+        "! rtpjpegdepay "
+        "! jpegparse "
+        "! %s "
+        "! queue name=jpeg-queue leaky=downstream max-size-buffers=2 "
+        "! video-selector.sink_0 "
+        "src. ! application/x-rtp,media=video,encoding-name=H264 "
+        "! rtph264depay "
+        "! h264parse "
+        "! %s "
+        "! queue name=h264-queue leaky=downstream max-size-buffers=2 "
+        "! video-selector.sink_1";
+    launch_command_app = g_strdup_printf(pipeline_template, selected_jpeg_decoder, selected_h264_decoder);
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
     GError *error = NULL;
     pipeline = gst_parse_launch(launch_command, &error);
+    if (launch_command_app) {
+        g_free(launch_command_app);
+    }
+
     if (error != NULL) {
         g_printerr("Error creating pipeline: %s\n", error->message);
         g_error_free(error);
         return;
     }
+
+    // Reset selector state for the new pipeline instance.
+    video_selector = NULL;
+    video_selector_jpeg_pad = NULL;
+    video_selector_h264_pad = NULL;
+    video_selector_locked = FALSE;
+
+    // Use the first branch that really receives buffers.
+    video_selector = gst_bin_get_by_name(GST_BIN(pipeline), "video-selector");
+    GstElement *jpeg_queue = gst_bin_get_by_name(GST_BIN(pipeline), "jpeg-queue");
+    GstElement *h264_queue = gst_bin_get_by_name(GST_BIN(pipeline), "h264-queue");
+    if (video_selector && jpeg_queue && h264_queue) {
+        video_selector_jpeg_pad = gst_element_get_static_pad(video_selector, "sink_0");
+        video_selector_h264_pad = gst_element_get_static_pad(video_selector, "sink_1");
+
+        // Prefer H264 initially, but allow runtime switch if JPEG buffers arrive first.
+        if (video_selector_h264_pad) {
+            g_object_set(video_selector, "active-pad", video_selector_h264_pad, NULL);
+        }
+
+        GstPad *jpeg_src_pad = gst_element_get_static_pad(jpeg_queue, "src");
+        GstPad *h264_src_pad = gst_element_get_static_pad(h264_queue, "src");
+        if (jpeg_src_pad) {
+            gst_pad_add_probe(jpeg_src_pad, GST_PAD_PROBE_TYPE_BUFFER, cb_probe_jpeg_branch, NULL, NULL);
+            gst_object_unref(jpeg_src_pad);
+        }
+        if (h264_src_pad) {
+            gst_pad_add_probe(h264_src_pad, GST_PAD_PROBE_TYPE_BUFFER, cb_probe_h264_branch, NULL, NULL);
+            gst_object_unref(h264_src_pad);
+        }
+    }
+    if (jpeg_queue)
+        gst_object_unref(jpeg_queue);
+    if (h264_queue)
+        gst_object_unref(h264_queue);
     
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
@@ -393,9 +508,11 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
 
-    // Use fakesink to ignore audio
-    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
-    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    // Only playbin-like pipelines expose audio-sink.
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(pipeline), "audio-sink") != NULL) {
+        audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    }
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
@@ -420,6 +537,23 @@ void rct_gst_terminate()
     
     if(video_overlay != NULL)
         gst_object_unref(video_overlay);
+
+    if(video_selector_jpeg_pad != NULL) {
+        gst_object_unref(video_selector_jpeg_pad);
+        video_selector_jpeg_pad = NULL;
+    }
+
+    if(video_selector_h264_pad != NULL) {
+        gst_object_unref(video_selector_h264_pad);
+        video_selector_h264_pad = NULL;
+    }
+
+    if(video_selector != NULL) {
+        gst_object_unref(video_selector);
+        video_selector = NULL;
+    }
+
+    video_selector_locked = FALSE;
     
     if(drawable_surface)
         drawable_surface = 0;
