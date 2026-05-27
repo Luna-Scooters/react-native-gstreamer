@@ -39,6 +39,11 @@ public class RCTGstPlayer extends SimpleViewManager {
         this.playerController.setRctGstUri(uri);
     }
 
+    @ReactProp(name = "autoPlay", defaultBoolean = false)
+    public void setAutoPlay(View controllerView, boolean autoPlay) {
+        this.playerController.setRctGstAutoPlay(autoPlay);
+    }
+
     @ReactProp(name = "audioLevelRefreshRate")
     public void setAudioLevelRefreshRate(View controllerView, int audioLevelRefreshRate) {
         this.playerController.setRctGstAudioLevelRefreshRate(audioLevelRefreshRate);

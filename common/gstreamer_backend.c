@@ -117,8 +117,8 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
                 g_object_set(G_OBJECT(video_sink),
                             "sync", FALSE,
                             "async", TRUE,
-                            "qos", TRUE,
-                            "max-lateness", 20 * GST_MSECOND,
+                            "qos", FALSE,
+                            "max-lateness", (gint64) -1,
                             NULL);
             }
 
@@ -339,10 +339,6 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
             cb_async_done(bus, message, user_data);
             break;
             
-        case GST_MESSAGE_QOS:
-            cb_qos(bus, message, user_data);
-            break;
-
         default:
             break;
     }
@@ -351,17 +347,15 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 }
 
 static void cb_source_created(GstElement *pipe, GstElement *source) {
-    /* Allow UDP, UDP-multicast and TCP (in that priority order) so we can
-     * benefit from lower-latency UDP when the network allows it, and fall
-     * back to TCP otherwise. GStreamer 1.28 also sends RTSP keepalives over
-     * TCP/interleaved, improving reliability with picky cameras. */
+    /* Force RTSP over TCP to reduce packet loss with MJPEG RTP streams.
+     * UDP packet loss often appears as jpegparse warnings and visual blinking. */
     g_object_set(source,
-                "latency", 150, /* 150 ms */
+                "latency", 250, /* 250 ms */
                 "buffer-mode", 1, /* Slave receiver to sender clock */
                 "drop-on-latency", FALSE,
                 "ntp-sync", FALSE,
                 "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x07, /* UDP | UDP-multicast | TCP */
+                "protocols", 0x04, /* TCP only */
                 "udp-buffer-size", 5242880, /* 5 MB */
                 "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
                 NULL);
@@ -383,14 +377,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
 
-    /* Single pipeline using decodebin3 which auto-plugs the best-ranked H.264
-     * decoder available on the device. GStreamer 1.28 reranks Android HW
-     * decoders via MediaCodecInfo.isHardwareAccelerated(), so we no longer
-     * need to hand-pick (and mis-identify) amcviddec-* variants. */
-    gchar *launch_command_app =
-        "rtspsrc name=src is-live=true ! "
-        "rtph264depay ! h264parse ! decodebin3 ! "
-        "glimagesink sync=false qos=false name=video-sink";
+    /* Codec-agnostic RTSP path handled by playbin. It auto-plugs depayloaders
+     * and decoders based on SDP (e.g. MJPEG or H.264). */
+    gchar *launch_command_app = "playbin name=player";
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -413,12 +402,16 @@ void rct_gst_init(RctGstConfiguration *configuration)
 
     g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
 
-    // Restart QoS Counter once in a while
-    g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
+    /* Only set playbin-specific properties when they are available. */
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(pipeline), "flags")) {
+        g_object_set(pipeline, "flags", 0x00000001, NULL); // GST_PLAY_FLAG_VIDEO
+    }
 
-    // Use fakesink to ignore audio
-    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
-    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(pipeline), "audio-sink")) {
+        // Use fakesink to ignore audio
+        audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    }
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)

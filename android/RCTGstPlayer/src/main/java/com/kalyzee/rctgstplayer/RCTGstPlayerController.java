@@ -31,8 +31,10 @@ public class RCTGstPlayerController
     implements RCTGstConfigurationCallable, SurfaceHolder.Callback {
 
   private static final String LOG_TAG = "RCTGstPlayer";
+  private static final int GST_STATE_PLAYING = 4;
 
   private boolean isInited = false;
+  private boolean autoPlay = false;
 
   private RCTGstConfiguration configuration;
   private EaglUIView view;
@@ -41,6 +43,7 @@ public class RCTGstPlayerController
   private AtomicBoolean runCopyImageThread = new AtomicBoolean(false);
   private CountDownLatch latchCopyImage;
   private Thread thCopyImage;
+  private final boolean enableFrameCache = false;
 
   // Native methods
   private native String nativeRCTGstGetGStreamerInfo();
@@ -54,11 +57,30 @@ public class RCTGstPlayerController
 
   private native void nativeRCTGstInitAndRun(RCTGstConfiguration configuration);
 
+  private boolean isBridgelessContext() {
+    return context != null
+        && context.getClass().getName().contains("BridgelessReactContext");
+  }
+
+  private void emitViewEvent(String eventName, WritableMap event) {
+    if (isBridgelessContext() || !context.hasCatalystInstance()) {
+      return;
+    }
+
+    try {
+      context.getJSModule(RCTEventEmitter.class)
+          .receiveEvent(view.getId(), eventName, event);
+    } catch (RuntimeException e) {
+      Log.w(LOG_TAG,
+            "Cannot emit view event in current React architecture: " + eventName,
+            e);
+    }
+  }
+
   // Configuration callbacks
   @Override
   public void onInit() {
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onPlayerInit", null);
+    emitViewEvent("onPlayerInit", null);
   }
 
   @Override
@@ -68,8 +90,7 @@ public class RCTGstPlayerController
     event.putInt("old_state", old_state);
     event.putInt("new_state", new_state);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onStateChanged", event);
+    emitViewEvent("onStateChanged", event);
   }
 
   @Override
@@ -80,8 +101,7 @@ public class RCTGstPlayerController
     event.putDouble("peak", peak);
     event.putDouble("decay", decay);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onVolumeChanged", event);
+    emitViewEvent("onVolumeChanged", event);
   }
 
   @Override
@@ -90,14 +110,12 @@ public class RCTGstPlayerController
 
     event.putString("new_uri", new_uri);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onUriChanged", event);
+    emitViewEvent("onUriChanged", event);
   }
 
   @Override
   public void onEOS() {
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onEOS", null);
+    emitViewEvent("onEOS", null);
   }
 
   @Override
@@ -108,8 +126,7 @@ public class RCTGstPlayerController
     event.putString("message", message);
     event.putString("debug_info", debug_info);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onElementError", event);
+    emitViewEvent("onElementError", event);
   }
 
   private final int captureFps = 30; /* Capture Frame Rate of 30 FPS */
@@ -157,9 +174,15 @@ public class RCTGstPlayerController
       // Init and run our pipeline
       nativeRCTGstInitAndRun(this.configuration);
 
-      runCopyImageThread.set(true);
-      thCopyImage = new Thread(() -> { threadCopyImageFunc(); });
-      thCopyImage.start();
+      if (autoPlay) {
+        nativeRCTGstSetPipelineState(GST_STATE_PLAYING);
+      }
+
+      if (enableFrameCache) {
+        runCopyImageThread.set(true);
+        thCopyImage = new Thread(() -> { threadCopyImageFunc(); });
+        thCopyImage.start();
+      }
 
       // Init done
       this.isInited = true;
@@ -174,11 +197,13 @@ public class RCTGstPlayerController
 
   @Override
   public void surfaceDestroyed(SurfaceHolder holder) {
-    runCopyImageThread.set(false);
-    try {
-      thCopyImage.join();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
+    if (enableFrameCache && thCopyImage != null) {
+      runCopyImageThread.set(false);
+      try {
+        thCopyImage.join();
+      } catch (InterruptedException e) {
+        throw new RuntimeException(e);
+      }
     }
   }
 
@@ -207,7 +232,19 @@ public class RCTGstPlayerController
   View getView() { return this.view; }
 
   // Manager Shared properties
-  void setRctGstUri(String uri) { nativeRCTGstSetUri(uri); }
+  void setRctGstUri(String uri) {
+    nativeRCTGstSetUri(uri);
+    if (autoPlay && isInited) {
+      nativeRCTGstSetPipelineState(GST_STATE_PLAYING);
+    }
+  }
+
+  void setRctGstAutoPlay(boolean autoPlay) {
+    this.autoPlay = autoPlay;
+    if (this.autoPlay && isInited) {
+      nativeRCTGstSetPipelineState(GST_STATE_PLAYING);
+    }
+  }
 
   void setRctGstAudioLevelRefreshRate(int audioLevelRefreshRate) {
     nativeRCTGstSetAudioLevelRefreshRate(audioLevelRefreshRate);
