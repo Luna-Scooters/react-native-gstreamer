@@ -1,5 +1,9 @@
 LOCAL_PATH := $(call my-dir)
 
+#16KB page-size flags
+GLOBAL_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
+TARGET_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
+
 include $(CLEAR_VARS)
 
 LOCAL_MODULE    := rctgstplayer
