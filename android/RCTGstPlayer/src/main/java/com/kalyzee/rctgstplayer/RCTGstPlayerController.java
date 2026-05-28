@@ -10,10 +10,15 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.View;
 import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactContext;
 import com.facebook.react.bridge.WritableMap;
-import com.facebook.react.uimanager.events.RCTEventEmitter;
+import com.facebook.react.uimanager.UIManagerHelper;
+import com.facebook.react.uimanager.events.Event;
+import com.facebook.react.uimanager.events.EventDispatcher;
 import com.kalyzee.rctgstplayer.utils.EaglUIView;
 import com.kalyzee.rctgstplayer.utils.ImageCache;
 import com.kalyzee.rctgstplayer.utils.RCTGstConfiguration;
@@ -57,8 +62,7 @@ public class RCTGstPlayerController
   // Configuration callbacks
   @Override
   public void onInit() {
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onPlayerInit", null);
+    emitEvent("onPlayerInit", null);
   }
 
   @Override
@@ -68,8 +72,7 @@ public class RCTGstPlayerController
     event.putInt("old_state", old_state);
     event.putInt("new_state", new_state);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onStateChanged", event);
+    emitEvent("onStateChanged", event);
   }
 
   @Override
@@ -80,8 +83,7 @@ public class RCTGstPlayerController
     event.putDouble("peak", peak);
     event.putDouble("decay", decay);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onVolumeChanged", event);
+    emitEvent("onVolumeChanged", event);
   }
 
   @Override
@@ -90,14 +92,12 @@ public class RCTGstPlayerController
 
     event.putString("new_uri", new_uri);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onUriChanged", event);
+    emitEvent("onUriChanged", event);
   }
 
   @Override
   public void onEOS() {
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onEOS", null);
+    emitEvent("onEOS", null);
   }
 
   @Override
@@ -108,8 +108,51 @@ public class RCTGstPlayerController
     event.putString("message", message);
     event.putString("debug_info", debug_info);
 
-    context.getJSModule(RCTEventEmitter.class)
-        .receiveEvent(view.getId(), "onElementError", event);
+    emitEvent("onElementError", event);
+  }
+
+  private void emitEvent(String eventName, @Nullable WritableMap eventData) {
+    if (context == null || view == null) {
+      return;
+    }
+
+    int reactTag = view.getId();
+    EventDispatcher dispatcher =
+        UIManagerHelper.getEventDispatcherForReactTag(context, reactTag);
+
+    if (dispatcher == null) {
+      return;
+    }
+
+    dispatcher.dispatchEvent(new RCTGstPlayerEvent(reactTag, eventName, eventData));
+  }
+
+  private static final class RCTGstPlayerEvent extends Event<RCTGstPlayerEvent> {
+    private final String eventName;
+    private final WritableMap eventData;
+
+    RCTGstPlayerEvent(int viewTag, String eventName, @Nullable WritableMap eventData) {
+      super(viewTag);
+      this.eventName = eventName;
+      this.eventData = eventData;
+    }
+
+    @NonNull
+    @Override
+    public String getEventName() {
+      return eventName;
+    }
+
+    @Override
+    public boolean canCoalesce() {
+      return false;
+    }
+
+    @Nullable
+    @Override
+    protected WritableMap getEventData() {
+      return eventData;
+    }
   }
 
   private final int captureFps = 30; /* Capture Frame Rate of 30 FPS */
