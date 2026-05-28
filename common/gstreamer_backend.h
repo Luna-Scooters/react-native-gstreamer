@@ -38,6 +38,11 @@ typedef struct
                           gchar *debug_info);
 } RctGstConfiguration;
 
+typedef struct {
+    const gchar *stream_type;
+    const gchar **decoders;
+} DecodersMap;
+
 // Getters
 RctGstConfiguration *rct_gst_get_configuration();
 RctGstAudioLevel *rct_gst_get_audio_level();

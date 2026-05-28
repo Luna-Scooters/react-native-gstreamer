@@ -36,6 +36,39 @@ GstPad *video_selector_jpeg_pad;
 GstPad *video_selector_h264_pad;
 gboolean video_selector_locked;
 
+static const DecodersMap decoders_map[] = {
+    // List of Android JPEG decoders
+    {
+        "JPEG",
+        (const gchar*[]) {
+            "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
+            "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
+            "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
+            "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
+            "amcviddec",                          // Generic Android Media Codec
+            "avdec_mjpeg",                        // libav software decoder
+            "jpegdec",                            // Software decoder (fallback)
+            NULL
+        }
+    },
+    // List of Android H264 decoders
+    {
+        "H264",
+        (const gchar*[]) {
+            "amcviddec-omxgoogleh264decoder",     // Google OMX decoder
+            "amcviddec-c2googleh264decoder",      // Codec 2.0 Google decoder
+            "amcviddec-omxqcomvideodecoderavc",   // Qualcomm OMX decoder
+            "amcviddec-qcomvideodecoderavc",      // Qualcomm decoder
+            "avdec_h264",                         // Software decoder
+            "vtdec",                              // iOS VideoToolbox decoder
+            "openh264dec",                        // OpenH264 decoder
+            "decodebin",                          // Generic fallback decoder
+            NULL
+        }
+     },
+     { NULL, NULL } // Sentinel to mark the end of the array
+};
+    
 // Getters
 RctGstConfiguration *rct_gst_get_configuration()
 {
@@ -366,96 +399,60 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
-    gchar *launch_command_app;
-
-    // List of Android JPEG decoders
-    const gchar *jpeg_decoders_list[] = {
-        "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
-        "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
-        "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
-        "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
-        "amcviddec",                          // Generic Android Media Codec
-        "jpegdec",                            // Software decoder (fallback)
-        NULL
-    };
-
-    // Prefer hardware H264 decoders, fallback to decodebin for broader compatibility.
-    const gchar *h264_decoders_list[] = {
-        "amcviddec-omxgoogleh264decoder",     // Google OMX decoder
-        "amcviddec-c2googleh264decoder",      // Codec 2.0 Google decoder
-        "amcviddec-omxqcomvideodecoderavc",   // Qualcomm OMX decoder
-        "amcviddec-qcomvideodecoderavc",      // Qualcomm decoder
-        "avdec_h264",                         // Software decoder
-        "decodebin",                          // Generic fallback decoder
-        NULL
-    };
-
-    const gchar *selected_jpeg_decoder = NULL;
-    const gchar *selected_h264_decoder = NULL;
-
-    // Test each JPEG decoder
-    GstElementFactory *factory = NULL;
-    for (int i = 0; jpeg_decoders_list[i] != NULL; i++) {
-        factory = gst_element_factory_find(jpeg_decoders_list[i]);
-        if (factory) {
-            selected_jpeg_decoder = jpeg_decoders_list[i];
-            gst_object_unref(factory);
-            break;
-        }
-    }
-
-    // Test each H264 decoder
-    for (int i = 0; h264_decoders_list[i] != NULL; i++) {
-        factory = gst_element_factory_find(h264_decoders_list[i]);
-        if (factory) {
-            selected_h264_decoder = h264_decoders_list[i];
-            gst_object_unref(factory);
-            break;
-        }
-    }
-
-    // Build pipeline with selected decoder or fallback to software decoder
-    if (selected_jpeg_decoder) {
-        g_print("Using JPEG decoder: [%s]\n", selected_jpeg_decoder);
-    } else {
-        selected_jpeg_decoder = "jpegdec";
-        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_jpeg_decoder);
-    }
-
-    if (selected_h264_decoder) {
-        g_print("Using H264 decoder: [%s]\n", selected_h264_decoder);
-    } else {
-        selected_h264_decoder = "decodebin";
-        g_print("No H264 decoder found, forcing fallback decoder: [%s]\n", selected_h264_decoder);
-    }
-
-    gchar *pipeline_template =
+    gchar *pipeline_builder =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "input-selector name=video-selector sync-mode=clock cache-buffers=false "
         "! videorate drop-out-of-segment=true "
         "! video/x-raw,framerate=10/1 "
         "! videoconvert "
-        "! glimagesink sync=false name=video-sink "
-        "src. ! application/x-rtp,media=video,encoding-name=JPEG "
-        "! rtpjpegdepay "
-        "! jpegparse "
+        "! glimagesink sync=false name=video-sink ";
+    gchar *branch_template =
+        "src. ! application/x-rtp,media=video,encoding-name=%s "
+        "! rtp%sdepay "
+        "! %sparse "
         "! %s "
-        "! queue name=jpeg-queue leaky=downstream max-size-buffers=2 "
-        "! video-selector.sink_0 "
-        "src. ! application/x-rtp,media=video,encoding-name=H264 "
-        "! rtph264depay "
-        "! h264parse "
-        "! %s "
-        "! queue name=h264-queue leaky=downstream max-size-buffers=2 "
-        "! video-selector.sink_1";
-    launch_command_app = g_strdup_printf(pipeline_template, selected_jpeg_decoder, selected_h264_decoder);
+        "! queue name=%s-queue leaky=downstream max-size-buffers=2 "
+        "! video-selector.sink_%d ";
+
+    for (int i = 0; decoders_map[i].stream_type != NULL; i++) {
+        GstElementFactory *factory = NULL;
+        const gchar *selected_decoder = NULL;
+        for (int j = 0; decoders_map[i].decoders[j] != NULL; j++) {
+            factory = gst_element_factory_find(decoders_map[i].decoders[j]);
+            if (factory) {
+                g_print("Selected %s decoder: %s\n", decoders_map[i].stream_type, decoders_map[i].decoders[j]);
+                selected_decoder = decoders_map[i].decoders[j];
+                gst_object_unref(factory);
+
+                g_print("Selected %s decoder: %s\n", decoders_map[i].stream_type, selected_decoder);
+                break;
+            }
+        }
+
+        if (selected_decoder == NULL) {
+            g_printerr("No decoder found for stream type %s; skipping branch.\n", decoders_map[i].stream_type);
+            continue;
+        }
+
+        gchar *stream_type_lower = g_ascii_strdown(decoders_map[i].stream_type, -1);
+        gchar *branch = g_strdup_printf(branch_template,
+                                        decoders_map[i].stream_type,
+                                        stream_type_lower,
+                                        stream_type_lower,
+                                        selected_decoder,
+                                        stream_type_lower,
+                                        i);
+        pipeline_builder = g_strconcat(pipeline_builder, branch, NULL);
+        g_free(branch);
+        g_free(stream_type_lower);
+    }
 
     // Prepare pipeline. If not working, will display an error video signal
-    gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
+    gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? pipeline_builder : launch_command_debug;
     GError *error = NULL;
     pipeline = gst_parse_launch(launch_command, &error);
-    if (launch_command_app) {
-        g_free(launch_command_app);
+    if (pipeline_builder) {
+        g_free(pipeline_builder);
     }
 
     if (error != NULL) {
