@@ -30,6 +30,8 @@ GstElement* audio_level_element;
 GstElement *video_sink;
 GstElement *audio_sink;
 
+GstElement *framerate_filter;
+
 // Getters
 RctGstConfiguration *rct_gst_get_configuration()
 {
@@ -99,29 +101,18 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
         video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
         
         if (!video_sink) {
-            // If no named video-sink found, check if this is a playbin pipeline
-            GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
-            if (!src_element) {
-                // This is likely a playbin pipeline - create and set glimagesink
-                video_sink = gst_element_factory_make("glimagesink", "video-sink");
-                g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
-            } else {
-                gst_object_unref(src_element);
-            }
+            // For playbin3 with a video-sink bin, find glimagesink by interface
+            video_sink = gst_bin_get_by_interface(GST_BIN(pipeline), GST_TYPE_VIDEO_OVERLAY);
+            if (!video_sink)
+                g_print(rct_gst_player, "Could not find GstVideoOverlay element in pipeline");
+            else
+                g_print(rct_gst_player, "Found video overlay element: %s", GST_ELEMENT_NAME(video_sink));
+        } else {
+            g_print(rct_gst_player, "Found named video-sink: %s", GST_ELEMENT_NAME(video_sink));
         }
         
         // Configure the video sink if we have one
         if (video_sink) {
-            // Configure for lower latency if it's not in debug mode
-            if (!rct_gst_get_configuration()->isDebugging) {
-                g_object_set(G_OBJECT(video_sink),
-                            "sync", FALSE,
-                            "async", TRUE,
-                            "qos", TRUE,
-                            "max-lateness", 20 * GST_MSECOND,
-                            NULL);
-            }
-
             // Set up video overlay if supported
             if (GST_IS_VIDEO_OVERLAY(video_sink)) {
                 video_overlay = GST_VIDEO_OVERLAY(video_sink);
@@ -286,35 +277,6 @@ static gboolean restart_stream(gpointer data) {
      return TRUE;
 }
 
-static const guint64 qos_count_max = 100;
-static guint refresh_qos_count_ms = 10000; // 10 seconds
-static guint64 qos_count = 0;
-static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
-{
-    // Show element name
-    const GstStructure *s = gst_message_get_structure(message);
-    if (s) {
-        const gchar *element = gst_element_get_name(GST_MESSAGE_SRC(message));
-        g_print("QoS event from element: %s\n", element);
-    }
-
-    // Increment the QoS counter
-    qos_count++;
-    if (qos_count >= qos_count_max) {
-        g_print("QoS counter reached maximum: %lu\n", qos_count);
-        // Reset the counter
-        qos_count = 0;
-        restart_stream(user_data);
-    }
-
-    return TRUE;
-}
-
-static gboolean cb_reset_qos_counter(gpointer data) {
-    qos_count = 0;
-    return TRUE;
-}
-
 static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_data)
 {
     switch (GST_MESSAGE_TYPE(message))
@@ -338,29 +300,36 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
         case GST_MESSAGE_ASYNC_DONE:
             cb_async_done(bus, message, user_data);
             break;
-            
-        case GST_MESSAGE_QOS:
-            cb_qos(bus, message, user_data);
+
+        case GST_MESSAGE_TAG: {
+            // Detect MJPEG streams and cap their framerate to 10/1
+            GstTagList *tags = NULL;
+            gst_message_parse_tag(message, &tags);
+            if (tags) {
+                gchar *codec = NULL;
+                if (gst_tag_list_get_string(tags, GST_TAG_VIDEO_CODEC, &codec)) {
+                    g_print(rct_gst_player, "Video codec tag: %s", codec);
+                    if (framerate_filter &&
+                        (g_ascii_strcasecmp(codec, "JPEG") || g_ascii_strcasecmp(codec, "MJPEG"))) {
+                        g_print(rct_gst_player, "MJPEG detected — capping framerate to 10/1");
+                        GstCaps *caps = gst_caps_new_simple("video/x-raw",
+                                                            "framerate", GST_TYPE_FRACTION, 10, 1,
+                                                            NULL);
+                        g_object_set(framerate_filter, "caps", caps, NULL);
+                        gst_caps_unref(caps);
+                    }
+                    g_free(codec);
+                }
+                gst_tag_list_unref(tags);
+            }
             break;
+        }
 
         default:
             break;
     }
     
     return TRUE;
-}
-
-static void cb_source_created(GstElement *pipe, GstElement *source) {
-    g_object_set(source,
-                "latency", 150, /* 150 ms */
-                "buffer-mode", 1, /* Slave receiver to sender clock */
-                "drop-on-latency", FALSE,
-                "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x04, /* TCP */
-                "udp-buffer-size", 5242880, /* 5 MB */
-                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
-                NULL);
 }
 
 /*************
@@ -377,30 +346,56 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 
 void rct_gst_init(RctGstConfiguration *configuration)
 {
-    gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
-    gchar *launch_command_app;
+    g_print(rct_gst_player, "Initializing pipeline (debugging=%s, uri=%s)",
+                 rct_gst_get_configuration()->isDebugging ? "yes" : "no",
+                 rct_gst_get_configuration()->uri ? rct_gst_get_configuration()->uri : "(none)");
 
-    const gchar *decoder_name = "amcviddec-omxgoogleh264decoder";
-    GstElementFactory *factory = gst_element_factory_find(decoder_name);
-    if (factory)
-    {
-        g_print("Hardware Decoder available: [%s]\n", decoder_name);
-        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
-    }
-    else
-    {
-        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
+    if (!rct_gst_get_configuration()->isDebugging) {
+        g_print(rct_gst_player, "Creating playbin3 pipeline");
+        pipeline = gst_element_factory_make("playbin3", "pipeline");
+    } else {
+        g_print(rct_gst_player, "Creating debug pipeline (videotestsrc)");
+        GError *error = NULL;
+        pipeline = gst_parse_launch("videotestsrc ! glimagesink name=video-sink", &error);
+        if (error != NULL) {
+            g_printerr(rct_gst_player, "Error creating debug pipeline: %s", error->message);
+            g_error_free(error);
+            return;
+        }
     }
 
-    // Prepare pipeline. If not working, will display an error video signal
-    gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
-    GError *error = NULL;
-    pipeline = gst_parse_launch(launch_command, &error);
-    if (error != NULL) {
-        g_printerr("Error creating pipeline: %s\n", error->message);
-        g_error_free(error);
+    if (!pipeline) {
+        g_printerr(rct_gst_player, "Failed to create pipeline");
         return;
     }
+
+    g_print(rct_gst_player, "Pipeline created successfully");
+
+    // Build a video-sink bin: videorate ! capsfilter ! glimagesink
+    // The capsfilter starts as a passthrough; GST_MESSAGE_TAG sets framerate=10/1
+    // when an MJPEG stream is detected.
+    GstElement *video_sink_bin = gst_bin_new("video-sink-bin");
+    GstElement *videorate = gst_element_factory_make("videorate", NULL);
+    g_object_set(videorate, "drop-out-of-segment", TRUE, "drop-only", TRUE, NULL);
+    framerate_filter = gst_element_factory_make("capsfilter", "framerate-filter");
+    // Start with a high ceiling (60/1) so videorate has a valid target and passes
+    // most streams through unmodified. When MJPEG is detected via GST_MESSAGE_TAG
+    // this is tightened to 10/1.
+    GstCaps *passthrough = gst_caps_new_simple("video/x-raw",
+                                               "framerate", GST_TYPE_FRACTION, 60, 1,
+                                               NULL);
+    g_object_set(framerate_filter, "caps", passthrough, NULL);
+    gst_caps_unref(passthrough);
+    GstElement *glsink = gst_element_factory_make("glimagesink", NULL);
+    g_object_set(glsink, "sync", FALSE, "qos", TRUE, "max-lateness", (gint64)(20 * GST_MSECOND), NULL);
+    gst_bin_add_many(GST_BIN(video_sink_bin), videorate, framerate_filter, glsink, NULL);
+    gst_element_link_many(videorate, framerate_filter, glsink, NULL);
+    GstPad *vs_sink_pad = gst_element_get_static_pad(videorate, "sink");
+    gst_element_add_pad(video_sink_bin, gst_ghost_pad_new("sink", vs_sink_pad));
+    gst_object_unref(vs_sink_pad);
+    g_object_set(pipeline, "video-sink", video_sink_bin, NULL);
+    gst_object_unref(video_sink_bin);
+    g_print(rct_gst_player, "Video sink bin (videorate + capsfilter + glimagesink) installed");
     
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
@@ -411,14 +406,11 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
 
-    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
-
-    // Restart QoS Counter once in a while
-    g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
-
-    // Use fakesink to ignore audio
-    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
-    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    // Only playbin-like pipelines expose audio-sink.
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(pipeline), "audio-sink") != NULL) {
+        audio_sink = gst_element_factory_make("fakesink", "audio-sink");
+        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+    }
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)
@@ -438,12 +430,14 @@ void rct_gst_run_loop()
 void rct_gst_terminate()
 {
     /* Free resources */
+    framerate_filter = NULL;
+
     if(video_sink != NULL)
         gst_object_unref(video_sink);
     
     if(video_overlay != NULL)
         gst_object_unref(video_overlay);
-    
+
     if(drawable_surface)
         drawable_surface = 0;
     
@@ -469,18 +463,9 @@ gchar *rct_gst_get_info()
 
 void apply_uri()
 {
+    g_print(rct_gst_player, "Applying URI: %s", rct_gst_get_configuration()->uri ? rct_gst_get_configuration()->uri : "(null)");
     rct_gst_set_pipeline_state(GST_STATE_READY);
-
-    // Check if this is a rtspsrc pipeline or playbin pipeline
-    GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
-    if (src_element) {
-        // This is the rtspsrc pipeline - set location on the rtspsrc element
-        g_object_set(src_element, "location", rct_gst_get_configuration()->uri, NULL);
-        gst_object_unref(src_element);
-    } else {
-        // This is the playbin pipeline - set uri on the pipeline
-        g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
-    }
+    g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
 
     if (rct_gst_get_configuration()->onUriChanged) {
         rct_gst_get_configuration()->onUriChanged(rct_gst_get_configuration()->uri);
