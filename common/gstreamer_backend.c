@@ -370,7 +370,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "! %s "
         "! videorate drop-out-of-segment=true "
         "! video/x-raw,framerate=10/1 "
-        "! videoconvert "
+        "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
 
