@@ -286,21 +286,23 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 {
     [self stopImageCapture];
 
+    [[ImageCache getInstance] getImage:YES];
+
+    imageRenderer = nil;
     if (currentInstance == self) {
         currentInstance = nil;
+
+        rct_gst_terminate();
+        g_free(new_uri);
+        g_free(source);
+        g_free(message);
+        g_free(debug_info);
+        new_uri = NULL;
+        source = NULL;
+        message = NULL;
+        debug_info = NULL;
+        [self destroyDrawableSurface];
     }
-
-    [[ImageCache getInstance] getImage:YES];
-    
-    imageRenderer = nil;
-    
-    rct_gst_terminate();
-    g_free(new_uri);
-    g_free(source);
-    g_free(message);
-    g_free(debug_info);
-
-    [self destroyDrawableSurface];
 }
 
 - (void)startImageCaptureThread {
