@@ -205,6 +205,7 @@ void onVolumeChanged(RctGstAudioLevel* audioLevel) {
 }
 
 void onUriChanged(gchar* newUri) {
+    g_free(new_uri);
     new_uri = g_strdup(newUri);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
@@ -229,6 +230,9 @@ void onEOS() {
 }
 
 void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
+    g_free(source);
+    g_free(message);
+    g_free(debug_info);
     source = g_strdup(_source);
     message = g_strdup(_message);
     debug_info = g_strdup(_debug_info);
