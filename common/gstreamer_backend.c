@@ -22,6 +22,7 @@ GstBus *bus;
 // Video
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
+static gchar *last_applied_uri = NULL;
 
 // Audio
 GstElement* audio_level_element;
@@ -63,6 +64,13 @@ RctGstAudioLevel *rct_gst_get_audio_level()
 // Setters
 void rct_gst_set_uri(gchar* _uri)
 {
+    if (pipeline && last_applied_uri && _uri && g_strcmp0(last_applied_uri, _uri) == 0) {
+        return;
+    }
+
+    g_free(last_applied_uri);
+    last_applied_uri = g_strdup(_uri);
+
     rct_gst_get_configuration()->uri = _uri;
     if (pipeline)
         apply_uri();
@@ -175,6 +183,31 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
 /*********************
  APPLICATION CALLBACKS
  ********************/
+
+#if defined(__APPLE__)
+// Skip audio stream
+static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpointer user_data)
+{
+    const GstStructure *s = caps ? gst_caps_get_structure(caps, 0) : NULL;
+    const gchar *media = s ? gst_structure_get_string(s, "media") : NULL;
+    if (media && g_strcmp0(media, "audio") == 0)
+        return FALSE;
+    return TRUE;
+}
+
+// Force TCP protocol
+static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer user_data)
+{
+    GObjectClass *klass = G_OBJECT_GET_CLASS(source);
+    if (g_object_class_find_property(klass, "protocols"))
+        g_object_set(source, "protocols", 0x4 /* GST_RTSP_LOWER_TRANS_TCP */, NULL);
+    if (g_object_class_find_property(klass, "latency"))
+        g_object_set(source, "latency", 0, NULL);
+    if (g_signal_lookup("select-stream", G_OBJECT_TYPE(source)))
+        g_signal_connect(source, "select-stream", G_CALLBACK(cb_select_stream), NULL);
+}
+#endif
+
 static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
 {
     GError *err;
@@ -363,6 +396,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
         selected_decoder = "jpegdec";
         g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
     }
+#if defined(__APPLE__)
+    launch_command_app = g_strdup("playbin");
+#else
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjpegdepay "
@@ -373,6 +409,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
+#endif
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -383,7 +420,12 @@ void rct_gst_init(RctGstConfiguration *configuration)
         g_error_free(error);
         return;
     }
-    
+
+#if defined(__APPLE__)
+    // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
+    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
+#endif
+
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
     bus_watch_id = gst_bus_add_watch(bus, cb_bus_watch, NULL);
@@ -437,6 +479,10 @@ void rct_gst_terminate()
     pipeline = NULL;
     configuration = NULL;
     audio_level = NULL;
+    video_sink = NULL;
+    video_overlay = NULL;
+    g_free(last_applied_uri);
+    last_applied_uri = NULL;
 }
 
 gchar *rct_gst_get_info()
