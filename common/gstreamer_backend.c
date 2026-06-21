@@ -208,6 +208,37 @@ static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer us
 }
 #endif
 
+static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
+{
+    GstIterator *it = gst_bin_iterate_elements(bin);
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK: {
+                GstElement *el = GST_ELEMENT(g_value_get_object(&item));
+                gchar *name = gst_element_get_name(el);
+                GstElementFactory *f = gst_element_get_factory(el);
+                g_print("[GST-PIPE] %*s%s [%s]\n", depth * 2, "",
+                        name, f ? GST_OBJECT_NAME(f) : "?");
+                g_free(name);
+                if (GST_IS_BIN(el))
+                    rct_gst_dump_pipeline(GST_BIN(el), depth + 1);
+                g_value_reset(&item);
+                break;
+            }
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(it);
+                break;
+            default:
+                done = TRUE;
+                break;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(it);
+}
+
 static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
 {
     GError *err;
@@ -238,11 +269,14 @@ static void cb_state_changed(GstBus *bus, GstMessage *msg, gpointer *user_data)
     // Only pay attention to messages coming from the pipeline, not its children
     if(GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline))
     {
+        if (new_state == GST_STATE_PLAYING) {
+            rct_gst_dump_pipeline(GST_BIN(pipeline), 0);
+        }
+
         if (rct_gst_get_configuration()->onStateChanged) {
             rct_gst_get_configuration()->onStateChanged(old_state, new_state);
         }
     }
-    
 }
 
 static gboolean cb_message_element(GstBus *bus, GstMessage *msg, gpointer *user_data)

@@ -95,8 +95,6 @@ dispatch_queue_t events_queue;
 - (void) destroyDrawableSurface
 {
     if (self->drawableSurface) {
-        rct_gst_set_drawable_surface(0);
-        
         if ([NSThread isMainThread]) {
             [self->drawableSurface removeFromSuperview];
         } else {
@@ -109,13 +107,12 @@ dispatch_queue_t events_queue;
     }
 }
 
-// Destroy and recreate a window
+// Set the pipeline to playing
 - (void) recreateView
 {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            [self destroyDrawableSurface];
-            [self createDrawableSurface];
+            rct_gst_set_pipeline_state(GST_STATE_PLAYING);
             [self startImageCaptureThread];
         });
 }
@@ -260,7 +257,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     
     // Preparing configuration
     configuration = rct_gst_get_configuration();
-    configuration->initialDrawableSurface = self->drawableSurface;
+    configuration->initialDrawableSurface = [self->drawableSurface getHandle];
     
     configuration->onInit = onInit;
     configuration->onStateChanged = onStateChanged;
@@ -288,7 +285,6 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
 
     [[ImageCache getInstance] getImage:YES];
 
-    imageRenderer = nil;
     if (currentInstance == self) {
         currentInstance = nil;
 
@@ -329,17 +325,13 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     [super viewWillDisappear:animated];
     [self stopImageCapture];
 
-    [self destroyDrawableSurface];
+    rct_gst_set_pipeline_state(GST_STATE_PAUSED);
 }
 
 - (void)viewDidDisappear:(BOOL)animated
 {
     [super viewDidDisappear:animated];
-    
-    
     [[ImageCache getInstance] getImage:YES];
-    
-    imageRenderer = nil;
 }
 
 @end
