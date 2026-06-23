@@ -150,6 +150,15 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     }
 }
 
+GstSample *rct_gst_pull_last_sample(void)
+{
+    if (!video_sink)
+        return NULL;
+    GstSample *sample = NULL;
+    g_object_get(video_sink, "last-sample", &sample, NULL);
+    return sample;
+}
+
 /**********************
  AUDIO HANDLING METHODS
  *********************/
