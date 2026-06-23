@@ -7,6 +7,10 @@
 
 #include "gstreamer_backend.h"
 
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+
 // Log info
 GST_DEBUG_CATEGORY_STATIC(rct_gst_player);
 
@@ -110,9 +114,18 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // If no named video-sink found, check if this is a playbin pipeline
             GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
             if (!src_element) {
-                // This is likely a playbin pipeline - create and set glimagesink
-                video_sink = gst_element_factory_make("glimagesink", "video-sink");
-                g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+                GstElement *vbin = gst_parse_bin_from_description(
+                    "vulkanupload ! vulkancolorconvert "
+                    "! vulkansink name=video-sink enable-last-sample=true",
+                    TRUE, NULL);
+                if (vbin) {
+                    g_object_set(GST_OBJECT(pipeline), "video-sink", vbin, NULL);
+                    video_sink = gst_bin_get_by_name(GST_BIN(vbin), "video-sink");
+                } else {
+                    g_printerr("vulkan video-sink bin failed, falling back to glimagesink\n");
+                    video_sink = gst_element_factory_make("glimagesink", "video-sink");
+                    g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+                }
             } else {
                 gst_object_unref(src_element);
             }
@@ -251,7 +264,13 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     }
     g_clear_error(&err);
     g_free(debug_info);
+#if defined(__APPLE__)
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        rct_gst_set_pipeline_state(GST_STATE_NULL);
+    });
+#else
     rct_gst_set_pipeline_state(GST_STATE_NULL);
+#endif
 }
 
 static void cb_eos(GstBus *bus, GstMessage *msg, gpointer *user_data)
