@@ -325,7 +325,24 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     [super viewWillDisappear:animated];
     [self stopImageCapture];
 
-    rct_gst_set_pipeline_state(GST_STATE_PAUSED);
+    rct_gst_set_pipeline_state(GST_STATE_NULL);
+    [self removeGstSubviews];
+}
+
+- (void)removeGstSubviews
+{
+    if (!self->drawableSurface)
+        return;
+    void (^sweep)(void) = ^{
+        for (UIView *sub in [self->drawableSurface.subviews copy]) {
+            [sub removeFromSuperview];
+        }
+    };
+    if ([NSThread isMainThread]) {
+        sweep();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), sweep);
+    }
 }
 
 - (void)viewDidDisappear:(BOOL)animated
