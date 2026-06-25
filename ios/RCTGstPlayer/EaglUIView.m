@@ -6,12 +6,13 @@
 //
 
 #import "EaglUIView.h"
+#import <QuartzCore/CAMetalLayer.h>
 
 @implementation EaglUIView
 
 + (Class) layerClass
 {
-    return [CAEAGLLayer class];
+    return [CAMetalLayer class];
 }
 
 - (instancetype)initWithFrame:(CGRect)frame

@@ -57,4 +57,6 @@ void rct_gst_terminate();
 gchar *rct_gst_get_info();
 void apply_uri();
 
+GstSample *rct_gst_pull_last_sample(void);
+
 #endif /* gstreamer_backend_h */
