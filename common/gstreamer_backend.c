@@ -206,7 +206,6 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
  APPLICATION CALLBACKS
  ********************/
 
-#if defined(__APPLE__)
 // Skip audio stream
 static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpointer user_data)
 {
@@ -228,7 +227,6 @@ static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer us
     if (g_signal_lookup("select-stream", G_OBJECT_TYPE(source)))
         g_signal_connect(source, "select-stream", G_CALLBACK(cb_select_stream), NULL);
 }
-#endif
 
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
 {
@@ -502,10 +500,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
         gst_object_unref(jpegparse_elem);
     }
 
-#if defined(__APPLE__)
     // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
     g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
-#endif
 
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
