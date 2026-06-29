@@ -15,19 +15,14 @@ Pod::Spec.new do |s|
   s.source_files = "ios/RCTGstPlayer/*.{h,m}", "common/*.{h,c}"
   s.public_header_files = "ios/RCTGstPlayer/*.h"
   
+  gst_root = '$(PODS_ROOT)/../../GStreamer-iOS/GStreamer.xcframework'
+  gst_device = "#{gst_root}/ios-arm64"
+  gst_sim    = "#{gst_root}/ios-arm64_x86_64-simulator"
+
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
-    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 arm64',
-    'HEADER_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Headers"',
-    'LD_RUNPATH_SEARCH_PATHS' => ['"${HOME}/Library/Developer/GStreamer/iPhone.sdk"', '"${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Libraries"'],
-    'OTHER_LDFLAGS' => '" -L${HOME}/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Libraries -F${HOME}/Library/Developer/GStreamer/iPhone.sdk -framework GStreamer "'
+    "HEADER_SEARCH_PATHS[sdk=iphoneos*]"        => "\"#{gst_device}/Headers\"",
+    "HEADER_SEARCH_PATHS[sdk=iphonesimulator*]" => "\"#{gst_sim}/Headers\"",
   }
-  
-  s.vendored_frameworks = "GStreamer.framework" 
-  s.xcconfig = { 'FRAMEWORK_SEARCH_PATHS' => '"${HOME}/Library/Developer/GStreamer/iPhone.sdk"' }
-
-  # Properly specify architecture requirements
-  s.user_target_xcconfig = { 'VALID_ARCHS' => 'arm64' }
-  
   s.dependency "React-Core"
 end
