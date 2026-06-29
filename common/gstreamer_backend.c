@@ -206,7 +206,6 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
  APPLICATION CALLBACKS
  ********************/
 
-#if defined(__APPLE__)
 // Skip audio stream
 static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpointer user_data)
 {
@@ -228,7 +227,6 @@ static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer us
     if (g_signal_lookup("select-stream", G_OBJECT_TYPE(source)))
         g_signal_connect(source, "select-stream", G_CALLBACK(cb_select_stream), NULL);
 }
-#endif
 
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
 {
@@ -422,6 +420,18 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     return validity;
 }
 
+static GstPadProbeReturn
+drop_corrupt_jpeg_frames(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    // Drop frames that jpegparse flagged as incomplete (no EOI) — they render as gray
+    if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED) ||
+        gst_buffer_get_size(buffer) < 1024) {
+        return GST_PAD_PROBE_DROP;
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
@@ -464,10 +474,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjpegdepay "
-        "! jpegparse "
+        "! jpegparse name=jpegparse0 "
         "! %s "
-        "! videorate drop-out-of-segment=true "
-        "! video/x-raw,framerate=10/1 "
         "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
@@ -483,10 +491,17 @@ void rct_gst_init(RctGstConfiguration *configuration)
         return;
     }
 
-#if defined(__APPLE__)
+    // Drop corrupt/truncated JPEG frames before they reach the decoder (renders as gray)
+    GstElement *jpegparse_elem = gst_bin_get_by_name(GST_BIN(pipeline), "jpegparse0");
+    if (jpegparse_elem) {
+        GstPad *src_pad = gst_element_get_static_pad(jpegparse_elem, "src");
+        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, drop_corrupt_jpeg_frames, NULL, NULL);
+        gst_object_unref(src_pad);
+        gst_object_unref(jpegparse_elem);
+    }
+
     // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
     g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
-#endif
 
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
