@@ -7,6 +7,10 @@
 
 #include "gstreamer_backend.h"
 
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
+#endif
+
 // Log info
 GST_DEBUG_CATEGORY_STATIC(rct_gst_player);
 
@@ -22,6 +26,7 @@ GstBus *bus;
 // Video
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
+static gchar *last_applied_uri = NULL;
 
 // Audio
 GstElement* audio_level_element;
@@ -63,6 +68,13 @@ RctGstAudioLevel *rct_gst_get_audio_level()
 // Setters
 void rct_gst_set_uri(gchar* _uri)
 {
+    if (pipeline && last_applied_uri && _uri && g_strcmp0(last_applied_uri, _uri) == 0) {
+        return;
+    }
+
+    g_free(last_applied_uri);
+    last_applied_uri = g_strdup(_uri);
+
     rct_gst_get_configuration()->uri = _uri;
     if (pipeline)
         apply_uri();
@@ -102,9 +114,18 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // If no named video-sink found, check if this is a playbin pipeline
             GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
             if (!src_element) {
-                // This is likely a playbin pipeline - create and set glimagesink
-                video_sink = gst_element_factory_make("glimagesink", "video-sink");
-                g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+                GstElement *vbin = gst_parse_bin_from_description(
+                    "vulkanupload ! vulkancolorconvert "
+                    "! vulkansink name=video-sink enable-last-sample=true",
+                    TRUE, NULL);
+                if (vbin) {
+                    g_object_set(GST_OBJECT(pipeline), "video-sink", vbin, NULL);
+                    video_sink = gst_bin_get_by_name(GST_BIN(vbin), "video-sink");
+                } else {
+                    g_printerr("vulkan video-sink bin failed, falling back to glimagesink\n");
+                    video_sink = gst_element_factory_make("glimagesink", "video-sink");
+                    g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
+                }
             } else {
                 gst_object_unref(src_element);
             }
@@ -115,8 +136,6 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             // Configure for lower latency if it's not in debug mode
             if (!rct_gst_get_configuration()->isDebugging) {
                 g_object_set(G_OBJECT(video_sink),
-                            "sync", FALSE,
-                            "async", TRUE,
                             "qos", TRUE,
                             "max-lateness", 20 * GST_MSECOND,
                             NULL);
@@ -129,6 +148,15 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
             }
         }
     }
+}
+
+GstSample *rct_gst_pull_last_sample(void)
+{
+    if (!video_sink)
+        return NULL;
+    GstSample *sample = NULL;
+    g_object_get(video_sink, "last-sample", &sample, NULL);
+    return sample;
 }
 
 /**********************
@@ -177,6 +205,60 @@ GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user
 /*********************
  APPLICATION CALLBACKS
  ********************/
+
+// Skip audio stream
+static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpointer user_data)
+{
+    const GstStructure *s = caps ? gst_caps_get_structure(caps, 0) : NULL;
+    const gchar *media = s ? gst_structure_get_string(s, "media") : NULL;
+    if (media && g_strcmp0(media, "audio") == 0)
+        return FALSE;
+    return TRUE;
+}
+
+// Force TCP protocol
+static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer user_data)
+{
+    GObjectClass *klass = G_OBJECT_GET_CLASS(source);
+    if (g_object_class_find_property(klass, "protocols"))
+        g_object_set(source, "protocols", 0x4 /* GST_RTSP_LOWER_TRANS_TCP */, NULL);
+    if (g_object_class_find_property(klass, "latency"))
+        g_object_set(source, "latency", 0, NULL);
+    if (g_signal_lookup("select-stream", G_OBJECT_TYPE(source)))
+        g_signal_connect(source, "select-stream", G_CALLBACK(cb_select_stream), NULL);
+}
+
+static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
+{
+    GstIterator *it = gst_bin_iterate_elements(bin);
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK: {
+                GstElement *el = GST_ELEMENT(g_value_get_object(&item));
+                gchar *name = gst_element_get_name(el);
+                GstElementFactory *f = gst_element_get_factory(el);
+                g_print("[GST-PIPE] %*s%s [%s]\n", depth * 2, "",
+                        name, f ? GST_OBJECT_NAME(f) : "?");
+                g_free(name);
+                if (GST_IS_BIN(el))
+                    rct_gst_dump_pipeline(GST_BIN(el), depth + 1);
+                g_value_reset(&item);
+                break;
+            }
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(it);
+                break;
+            default:
+                done = TRUE;
+                break;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(it);
+}
+
 static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
 {
     GError *err;
@@ -189,7 +271,13 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     }
     g_clear_error(&err);
     g_free(debug_info);
+#if defined(__APPLE__)
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        rct_gst_set_pipeline_state(GST_STATE_NULL);
+    });
+#else
     rct_gst_set_pipeline_state(GST_STATE_NULL);
+#endif
 }
 
 static void cb_eos(GstBus *bus, GstMessage *msg, gpointer *user_data)
@@ -207,11 +295,14 @@ static void cb_state_changed(GstBus *bus, GstMessage *msg, gpointer *user_data)
     // Only pay attention to messages coming from the pipeline, not its children
     if(GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline))
     {
+        if (new_state == GST_STATE_PLAYING) {
+            rct_gst_dump_pipeline(GST_BIN(pipeline), 0);
+        }
+
         if (rct_gst_get_configuration()->onStateChanged) {
             rct_gst_get_configuration()->onStateChanged(old_state, new_state);
         }
     }
-    
 }
 
 static gboolean cb_message_element(GstBus *bus, GstMessage *msg, gpointer *user_data)
@@ -286,35 +377,6 @@ static gboolean restart_stream(gpointer data) {
      return TRUE;
 }
 
-static const guint64 qos_count_max = 100;
-static guint refresh_qos_count_ms = 10000; // 10 seconds
-static guint64 qos_count = 0;
-static gboolean cb_qos(GstBus *bus, GstMessage *message, gpointer user_data)
-{
-    // Show element name
-    const GstStructure *s = gst_message_get_structure(message);
-    if (s) {
-        const gchar *element = gst_element_get_name(GST_MESSAGE_SRC(message));
-        g_print("QoS event from element: %s\n", element);
-    }
-
-    // Increment the QoS counter
-    qos_count++;
-    if (qos_count >= qos_count_max) {
-        g_print("QoS counter reached maximum: %lu\n", qos_count);
-        // Reset the counter
-        qos_count = 0;
-        restart_stream(user_data);
-    }
-
-    return TRUE;
-}
-
-static gboolean cb_reset_qos_counter(gpointer data) {
-    qos_count = 0;
-    return TRUE;
-}
-
 static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_data)
 {
     switch (GST_MESSAGE_TYPE(message))
@@ -339,28 +401,11 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
             cb_async_done(bus, message, user_data);
             break;
             
-        case GST_MESSAGE_QOS:
-            cb_qos(bus, message, user_data);
-            break;
-
         default:
             break;
     }
     
     return TRUE;
-}
-
-static void cb_source_created(GstElement *pipe, GstElement *source) {
-    g_object_set(source,
-                "latency", 150, /* 150 ms */
-                "buffer-mode", 1, /* Slave receiver to sender clock */
-                "drop-on-latency", FALSE,
-                "ntp-sync", FALSE,
-                "max-ts-offset", 50 * 1000 * 1000, /* 50 ms */
-                "protocols", 0x04, /* TCP */
-                "udp-buffer-size", 5242880, /* 5 MB */
-                "max-rtcp-rtp-time-diff", 200 * 1000 * 1000, /* 200 ms */
-                NULL);
 }
 
 /*************
@@ -375,22 +420,66 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     return validity;
 }
 
+static GstPadProbeReturn
+drop_corrupt_jpeg_frames(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    // Drop frames that jpegparse flagged as incomplete (no EOI) — they render as gray
+    if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED) ||
+        gst_buffer_get_size(buffer) < 1024) {
+        return GST_PAD_PROBE_DROP;
+    }
+    return GST_PAD_PROBE_OK;
+}
+
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
-    const gchar *decoder_name = "amcviddec-omxgoogleh264decoder";
-    GstElementFactory *factory = gst_element_factory_find(decoder_name);
-    if (factory)
-    {
-        g_print("Hardware Decoder available: [%s]\n", decoder_name);
-        launch_command_app = "rtspsrc name=src is-live=true ! rtph264depay ! h264parse ! amcviddec-omxgoogleh264decoder ! glimagesink sync=false qos=false name=video-sink";
+    // List of Android JPEG decoders
+    const gchar *decoders_list[] = {
+        "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
+        "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
+        "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
+        "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
+        "amcviddec",                          // Generic Android Media Codec
+        "jpegdec",                            // Software decoder (fallback)
+        NULL
+    };
+
+    const gchar *selected_decoder = NULL;
+
+    // Test each jpeg decoder
+    GstElementFactory *factory = NULL;
+    for (int i = 0; decoders_list[i] != NULL; i++) {
+        factory = gst_element_factory_find(decoders_list[i]);
+        if (factory) {
+            selected_decoder = decoders_list[i];
+            gst_object_unref(factory);
+            break;
+        }
     }
-    else
-    {
-        launch_command_app = "playbin video-sink=\"queue ! autovideosink sync=false\"";
+
+    // Build pipeline with selected decoder or fallback to software decoder
+    if (selected_decoder) {
+        g_print("Using JPEG decoder: [%s]\n", selected_decoder);
+    } else {
+        selected_decoder = "jpegdec";
+        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
     }
+#if defined(__APPLE__)
+    launch_command_app = g_strdup("playbin");
+#else
+    gchar *pipeline_template =
+        "rtspsrc is-live=true protocols=tcp latency=0 name=src "
+        "! rtpjpegdepay "
+        "! jpegparse name=jpegparse0 "
+        "! %s "
+        "! autovideoconvert "
+        "! glimagesink sync=false name=video-sink";
+    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
+#endif
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -401,7 +490,19 @@ void rct_gst_init(RctGstConfiguration *configuration)
         g_error_free(error);
         return;
     }
-    
+
+    // Drop corrupt/truncated JPEG frames before they reach the decoder (renders as gray)
+    GstElement *jpegparse_elem = gst_bin_get_by_name(GST_BIN(pipeline), "jpegparse0");
+    if (jpegparse_elem) {
+        GstPad *src_pad = gst_element_get_static_pad(jpegparse_elem, "src");
+        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, drop_corrupt_jpeg_frames, NULL, NULL);
+        gst_object_unref(src_pad);
+        gst_object_unref(jpegparse_elem);
+    }
+
+    // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
+    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
+
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
     bus_watch_id = gst_bus_add_watch(bus, cb_bus_watch, NULL);
@@ -410,11 +511,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
-
-    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_created), NULL);
-
-    // Restart QoS Counter once in a while
-    g_timeout_add(refresh_qos_count_ms, cb_reset_qos_counter, NULL);
 
     // Use fakesink to ignore audio
     audio_sink = gst_element_factory_make("fakesink", "audio-sink");
@@ -460,6 +556,10 @@ void rct_gst_terminate()
     pipeline = NULL;
     configuration = NULL;
     audio_level = NULL;
+    video_sink = NULL;
+    video_overlay = NULL;
+    g_free(last_applied_uri);
+    last_applied_uri = NULL;
 }
 
 gchar *rct_gst_get_info()

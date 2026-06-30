@@ -16,6 +16,7 @@ GST_PLUGIN_STATIC_DECLARE(adder);
 #if defined(GST_IOS_PLUGIN_APP) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(app);
 #endif
+GST_PLUGIN_STATIC_DECLARE(vulkan);
 #if defined(GST_IOS_PLUGIN_AUDIOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
 GST_PLUGIN_STATIC_DECLARE(audioconvert);
 #endif
@@ -390,9 +391,6 @@ GST_PLUGIN_STATIC_DECLARE(wavpack);
 #if defined(GST_IOS_PLUGIN_WAVPARSE) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(wavparse);
 #endif
-#if defined(GST_IOS_PLUGIN_Y4MENC) || defined(GST_IOS_PLUGINS_CODECS)
-GST_PLUGIN_STATIC_DECLARE(y4menc);
-#endif
 #if defined(GST_IOS_PLUGIN_ADPCMDEC) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(adpcmdec);
 #endif
@@ -449,9 +447,6 @@ GST_PLUGIN_STATIC_DECLARE(subenc);
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOPARSERSBAD) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(videoparsersbad);
-#endif
-#if defined(GST_IOS_PLUGIN_Y4MDEC) || defined(GST_IOS_PLUGINS_CODECS)
-GST_PLUGIN_STATIC_DECLARE(y4mdec);
 #endif
 #if defined(GST_IOS_PLUGIN_JPEGFORMAT) || defined(GST_IOS_PLUGINS_CODECS)
 GST_PLUGIN_STATIC_DECLARE(jpegformat);
@@ -536,7 +531,12 @@ gst_ios_init (void)
   ca_certificates = g_build_filename (resources_dir, "ssl", "certs", "ca-certificates.crt", NULL);
   g_setenv ("CA_CERTIFICATES", ca_certificates, TRUE);
   g_free (ca_certificates);
-    
+
+  // iOS forbids JIT (no writable+executable memory), so ORC can't compile its SIMD
+  // fast paths. Force the non-JIT C backend so it doesn't repeatedly fail to mmap
+  // exec regions (the "Failed to create write and exec mmap regions" error).
+  g_setenv ("ORC_CODE", "backup", TRUE);
+
   gst_init (NULL, NULL);
 
   #if defined(GST_IOS_PLUGIN_NLE) || defined(GST_IOS_PLUGINS_GES)
@@ -554,6 +554,7 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_APP) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(app);
 #endif
+    GST_PLUGIN_STATIC_REGISTER(vulkan);
 #if defined(GST_IOS_PLUGIN_AUDIOCONVERT) || defined(GST_IOS_PLUGINS_CORE)
     GST_PLUGIN_STATIC_REGISTER(audioconvert);
 #endif
@@ -929,9 +930,6 @@ gst_ios_init (void)
 #if defined(GST_IOS_PLUGIN_WAVPARSE) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(wavparse);
 #endif
-#if defined(GST_IOS_PLUGIN_Y4MENC) || defined(GST_IOS_PLUGINS_CODECS)
-    GST_PLUGIN_STATIC_REGISTER(y4menc);
-#endif
 #if defined(GST_IOS_PLUGIN_ADPCMDEC) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(adpcmdec);
 #endif
@@ -988,9 +986,6 @@ gst_ios_init (void)
 #endif
 #if defined(GST_IOS_PLUGIN_VIDEOPARSERSBAD) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(videoparsersbad);
-#endif
-#if defined(GST_IOS_PLUGIN_Y4MDEC) || defined(GST_IOS_PLUGINS_CODECS)
-    GST_PLUGIN_STATIC_REGISTER(y4mdec);
 #endif
 #if defined(GST_IOS_PLUGIN_JPEGFORMAT) || defined(GST_IOS_PLUGINS_CODECS)
     GST_PLUGIN_STATIC_REGISTER(jpegformat);
