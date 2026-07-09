@@ -454,6 +454,8 @@ strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 
     GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
                                                   second_soi, size - second_soi);
+    if (!stripped)
+        return GST_PAD_PROBE_OK;
     gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
     gst_buffer_unref(stripped);
 
