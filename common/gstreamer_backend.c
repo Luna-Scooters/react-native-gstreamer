@@ -421,14 +421,42 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 }
 
 static GstPadProbeReturn
-drop_corrupt_jpeg_frames(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-    // Drop frames that jpegparse flagged as incomplete (no EOI) — they render as gray
-    if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED) ||
-        gst_buffer_get_size(buffer) < 1024) {
-        return GST_PAD_PROBE_DROP;
+    gsize size = gst_buffer_get_size(buffer);
+
+    if (size < 4)
+        return GST_PAD_PROBE_OK;
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
+        return GST_PAD_PROBE_OK;
+
+    /* RTSP server might send the full JPEG (SOI→EOI) as the RTP payload instead of
+     * RFC 2435 scan-data-only, so rtpjpegdepay prepends its own reconstructed
+     * header before the original JPEG, producing a buffer with two SOI markers.
+     * Find the second 0xFF 0xD8 and strip everything before it so jpegparse
+     * sees exactly one valid JPEG per buffer. */
+    gsize second_soi = (gsize)-1;
+    for (gsize i = 2; i + 1 < map.size; i++) {
+        if (map.data[i] == 0xFF && map.data[i + 1] == 0xD8) {
+            second_soi = i;
+            break;
+        }
     }
+    gst_buffer_unmap(buffer, &map);
+
+    if (second_soi == (gsize)-1)
+        return GST_PAD_PROBE_OK;
+
+    GST_LOG_OBJECT(pad, "Stripping %zu-byte header prefix in rtpjpegdepay ", second_soi);
+
+    GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
+                                                  second_soi, size - second_soi);
+    gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
+    gst_buffer_unref(stripped);
+
     return GST_PAD_PROBE_OK;
 }
 
@@ -473,8 +501,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
 #else
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
-        "! rtpjpegdepay "
-        "! jpegparse name=jpegparse0 "
+        "! rtpjpegdepay name=rtpjpegdepay0 "
+        "! jpegparse "
         "! %s "
         "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
@@ -491,13 +519,14 @@ void rct_gst_init(RctGstConfiguration *configuration)
         return;
     }
 
-    // Drop corrupt/truncated JPEG frames before they reach the decoder (renders as gray)
-    GstElement *jpegparse_elem = gst_bin_get_by_name(GST_BIN(pipeline), "jpegparse0");
-    if (jpegparse_elem) {
-        GstPad *src_pad = gst_element_get_static_pad(jpegparse_elem, "src");
-        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, drop_corrupt_jpeg_frames, NULL, NULL);
+    /* Strip the rtpjpegdepay-prepended reconstructed header before jpegparse
+     * sees the buffer, so it receives exactly one valid JPEG per frame. */
+    GstElement *depay_elem = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
+    if (depay_elem) {
+        GstPad *src_pad = gst_element_get_static_pad(depay_elem, "src");
+        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, strip_rtpjpeg_header, NULL, NULL);
         gst_object_unref(src_pad);
-        gst_object_unref(jpegparse_elem);
+        gst_object_unref(depay_elem);
     }
 
     // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
