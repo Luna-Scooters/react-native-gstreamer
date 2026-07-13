@@ -111,6 +111,21 @@ static void native_rct_gst_set_debugging(JNIEnv* env, jobject thiz, jboolean is_
     rct_gst_set_debugging(is_debugging);
 }
 
+static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j, jint width, jint height, jint fps)
+{
+    (void)thiz;
+    const char *path = (*env)->GetStringUTFChars(env, path_j, 0);
+    rct_gst_start_recording((const gchar *)path, width, height, fps);
+    (*env)->ReleaseStringUTFChars(env, path_j, path);
+}
+
+static void native_rct_gst_stop_recording(JNIEnv* env, jobject thiz)
+{
+    (void)env;
+    (void)thiz;
+    rct_gst_stop_recording();
+}
+
 
 void native_on_init()
 {
@@ -198,7 +213,10 @@ static JNINativeMethod native_methods[] = {
         { "nativeRCTGstSetDrawableSurface", "(Landroid/view/Surface;)V", (void *) native_rct_gst_set_drawable_surface },
         { "nativeRCTGstSetUri", "(Ljava/lang/String;)V", (void *) native_rct_gst_set_uri },
         { "nativeRCTGstSetAudioLevelRefreshRate", "(I)V", (void *) native_rct_gst_set_audio_level_refresh_rate },
-        { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging }
+        { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging },
+
+        { "nativeRCTGstStartRecording", "(Ljava/lang/String;III)V", (void *) native_rct_gst_start_recording },
+        { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording }
 };
 
 // Called by JNI

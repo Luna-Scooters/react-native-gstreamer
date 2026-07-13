@@ -141,6 +141,22 @@ export default class GstPlayer extends React.Component {
         )
     }
 
+    startRecording(path, width = 0, height = 0, fps = 0) {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.startRecording,
+            [path, width, height, fps]
+        )
+    }
+
+    stopRecording() {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.stopRecording,
+            []
+        )
+    }
+
     // Helper methods
     recreateView() {
         UIManager.dispatchViewManagerCommand(
@@ -195,6 +211,8 @@ GstPlayer.propTypes = {
     pause: PropTypes.func,
     stop: PropTypes.func,
     stopImageCapture: PropTypes.func,
+    startRecording: PropTypes.func,
+    stopRecording: PropTypes.func,
 
     // Helper methods
     createDrawableSurface: PropTypes.func,

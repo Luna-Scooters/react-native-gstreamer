@@ -55,6 +55,9 @@ public class RCTGstPlayerController
   nativeRCTGstSetAudioLevelRefreshRate(int audioLevelRefreshRate);
   private native void nativeRCTGstSetDebugging(boolean isDebugging);
 
+  private native void nativeRCTGstStartRecording(String path, int width, int height, int fps);
+  private native void nativeRCTGstStopRecording();
+
   private native void nativeRCTGstSetPipelineState(int state);
 
   private native void nativeRCTGstInitAndRun(RCTGstConfiguration configuration);
@@ -262,6 +265,12 @@ public class RCTGstPlayerController
 
   // Manager methods
   void setRctGstState(int state) { nativeRCTGstSetPipelineState(state); }
+
+  void startRecording(String path, int width, int height, int fps) {
+    nativeRCTGstStartRecording(path, width, height, fps);
+  }
+
+  void stopRecording() { nativeRCTGstStopRecording(); }
 
   // External C Libraries
   static {
