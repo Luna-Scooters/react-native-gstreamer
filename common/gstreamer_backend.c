@@ -35,6 +35,8 @@ GstElement* audio_level_element;
 GstElement *video_sink;
 GstElement *audio_sink;
 
+GstElement *video_tee; // Recording pipeline will attached here
+
 // Getters
 RctGstConfiguration *rct_gst_get_configuration()
 {
@@ -52,6 +54,7 @@ RctGstConfiguration *rct_gst_get_configuration()
         
         configuration->onInit = NULL;
         configuration->onEOS = NULL;
+        configuration->onRecordingFinished = NULL;
         configuration->initialDrawableSurface = 0;
     }
     return configuration;
@@ -414,6 +417,13 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
+
+    if (rct_gst_is_recording() && pipeline && state < GST_STATE_PLAYING) {
+        g_print("Recording active - deferring state change until finalized\n");
+        rct_gst_recorder_defer_state(state);
+        return GST_STATE_CHANGE_ASYNC;
+    }
+
     GstStateChangeReturn validity = gst_element_set_state(pipeline, state);
     g_print("Validity : %s\n", gst_element_state_change_return_get_name(validity));
 
@@ -467,6 +477,23 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
+    rct_gst_recorder_reset();
+    if (pipeline) {
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        if (bus_watch_id) {
+            g_source_remove(bus_watch_id);
+            bus_watch_id = 0;
+        }
+        gst_object_unref(pipeline);
+        pipeline = NULL;
+    }
+    if (video_sink) {
+        gst_object_unref(video_sink);
+        video_sink = NULL;
+    }
+    video_overlay = NULL;
+    video_tee = NULL;
+
     // List of Android JPEG decoders
     const gchar *decoders_list[] = {
         "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
@@ -506,6 +533,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "! rtpjpegdepay name=rtpjpegdepay0 "
         "! jpegparse "
         "! %s "
+        "! tee name=video-tee "
+        "! queue name=render-queue "
         "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
@@ -530,6 +559,13 @@ void rct_gst_init(RctGstConfiguration *configuration)
         gst_object_unref(src_pad);
         gst_object_unref(depay_elem);
     }
+
+    GstElement *tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
+    if (tee) {
+        video_tee = tee;               // borrowed, the pipeline owns it
+        gst_object_unref(tee);
+    }
+
 
     // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
     g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
@@ -573,6 +609,8 @@ void rct_gst_terminate()
     
     if(drawable_surface)
         drawable_surface = 0;
+
+    rct_gst_recorder_reset();
     
     rct_gst_set_pipeline_state(GST_STATE_NULL);
     gst_object_unref(pipeline);
@@ -589,6 +627,7 @@ void rct_gst_terminate()
     audio_level = NULL;
     video_sink = NULL;
     video_overlay = NULL;
+    video_tee = NULL;
     g_free(last_applied_uri);
     last_applied_uri = NULL;
 }

@@ -9,7 +9,9 @@ include $(CLEAR_VARS)
 LOCAL_MODULE    := rctgstplayer
 LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../../../../common
 
-LOCAL_SRC_FILES := rctgstplayer.c $(LOCAL_PATH)/../../../../../common/gstreamer_backend.c
+LOCAL_SRC_FILES := rctgstplayer.c \
+                   $(LOCAL_PATH)/../../../../../common/gstreamer_backend.c \
+                   $(LOCAL_PATH)/../../../../../common/gstreamer_recorder.c
 
 LOCAL_SHARED_LIBRARIES := gstreamer_android
 LOCAL_LDLIBS := -llog -landroid

@@ -60,8 +60,6 @@ void apply_uri();
 
 GstSample *rct_gst_pull_last_sample(void);
 
-void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gint fps);
-void rct_gst_stop_recording(void);
-gboolean rct_gst_is_recording(void);
+#include "gstreamer_recorder.h"
 
 #endif /* gstreamer_backend_h */
