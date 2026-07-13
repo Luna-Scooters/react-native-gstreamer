@@ -94,6 +94,8 @@ public class RCTGstPlayer extends SimpleViewManager {
                         "onEOS", MapBuilder.of("registrationName", "onEOS")
                 ).put(
                         "onElementError", MapBuilder.of("registrationName", "onElementError")
+                ).put(
+                        "onRecordingFinished", MapBuilder.of("registrationName", "onRecordingFinished")
                 ).build();
     }
 

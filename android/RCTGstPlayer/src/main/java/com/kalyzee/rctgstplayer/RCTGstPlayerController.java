@@ -114,6 +114,12 @@ public class RCTGstPlayerController
     emitEvent("onElementError", event);
   }
 
+  public void onRecordingFinished(String path) {
+    WritableMap event = Arguments.createMap();
+    event.putString("path", path);
+    emitEvent("onRecordingFinished", event);
+  }
+
   private void emitEvent(String eventName, @Nullable WritableMap eventData) {
     if (context == null || view == null) {
       return;

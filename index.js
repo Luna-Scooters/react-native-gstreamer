@@ -107,6 +107,13 @@ export default class GstPlayer extends React.Component {
             this.props.onElementError(source, message, debug_info)
     }
 
+    onRecordingFinished(_message) {
+        const { path } = _message.nativeEvent
+
+        if (this.props.onRecordingFinished)
+            this.props.onRecordingFinished(path)
+    }
+
     shouldComponentUpdate() {
         return true
     }
@@ -180,6 +187,7 @@ export default class GstPlayer extends React.Component {
                 onUriChanged={this.onUriChanged.bind(this)}
                 onEOS={this.onEOS.bind(this)}
                 onElementError={this.onElementError.bind(this)}
+                onRecordingFinished={this.onRecordingFinished.bind(this)}
 
                 ref={(playerView) => this.playerViewRef = playerView}
 
@@ -204,6 +212,7 @@ GstPlayer.propTypes = {
     onUriChanged: PropTypes.func,
     onEOS: PropTypes.func,
     onElementError: PropTypes.func,
+    onRecordingFinished: PropTypes.func,
 
     // Methods
     setGstState: PropTypes.func,
