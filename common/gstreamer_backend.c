@@ -6,6 +6,7 @@
 //
 
 #include "gstreamer_backend.h"
+#include "gstreamer_codec.h"
 
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
@@ -494,40 +495,10 @@ void rct_gst_init(RctGstConfiguration *configuration)
     video_overlay = NULL;
     video_tee = NULL;
 
-    // List of Android JPEG decoders
-    const gchar *decoders_list[] = {
-        "amcviddec-omxgooglejpegdecoder",     // Google OMX decoder
-        "amcviddec-qcomjpegdecoder",          // Qualcomm decoder
-        "amcviddec-omxqcomjpegdecoder",       // Qualcomm OMX decoder
-        "amcviddec-c2googlejpegdecoder",      // Codec 2.0 Google decoder
-        "amcviddec",                          // Generic Android Media Codec
-        "jpegdec",                            // Software decoder (fallback)
-        NULL
-    };
-
-    const gchar *selected_decoder = NULL;
-
-    // Test each jpeg decoder
-    GstElementFactory *factory = NULL;
-    for (int i = 0; decoders_list[i] != NULL; i++) {
-        factory = gst_element_factory_find(decoders_list[i]);
-        if (factory) {
-            selected_decoder = decoders_list[i];
-            gst_object_unref(factory);
-            break;
-        }
-    }
-
-    // Build pipeline with selected decoder or fallback to software decoder
-    if (selected_decoder) {
-        g_print("Using JPEG decoder: [%s]\n", selected_decoder);
-    } else {
-        selected_decoder = "jpegdec";
-        g_print("No JPEG decoder found, forcing software decoder: [%s]\n", selected_decoder);
-    }
 #if defined(__APPLE__)
     launch_command_app = g_strdup("playbin");
 #else
+    gchar *selected_decoder = rct_gst_find_jpeg_decoder();
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjpegdepay name=rtpjpegdepay0 "
@@ -538,6 +509,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "! autovideoconvert "
         "! glimagesink sync=false name=video-sink";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
+    g_free(selected_decoder);
 #endif
 
     // Prepare pipeline. If not working, will display an error video signal

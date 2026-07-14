@@ -4,6 +4,7 @@
 
 #include "gstreamer_recorder.h"
 #include "gstreamer_backend.h"
+#include "gstreamer_codec.h"
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
@@ -24,38 +25,6 @@ static RctGstRecorder recorder = {
     .deferred_state = GST_STATE_VOID_PENDING,
     .watchdog_id = 0,
 };
-
-// Pick the highest-ranked H.264 encoder, preferring a hardware one
-static gchar *find_best_h264_encoder(void)
-{
-    GList *encoders = gst_element_factory_list_get_elements(
-        GST_ELEMENT_FACTORY_TYPE_VIDEO_ENCODER, GST_RANK_MARGINAL);
-    GstCaps *h264 = gst_caps_from_string("video/x-h264");
-    GList *filtered = gst_element_factory_list_filter(encoders, h264, GST_PAD_SRC, FALSE);
-
-    gchar *best_name = NULL;
-    guint best_rank = 0;
-    gboolean best_hw = FALSE;
-    for (GList *l = filtered; l != NULL; l = l->next) {
-        GstElementFactory *f = GST_ELEMENT_FACTORY(l->data);
-        const gchar *klass = gst_element_factory_get_metadata(f, GST_ELEMENT_METADATA_KLASS);
-        gboolean hw = (klass && g_strstr_len(klass, -1, "Hardware")) ? TRUE : FALSE;
-        guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(f));
-        gboolean better = (best_name == NULL) || (hw && !best_hw) ||
-                          (hw == best_hw && rank > best_rank);
-        if (better) {
-            g_free(best_name);
-            best_name = g_strdup(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f)));
-            best_rank = rank;
-            best_hw = hw;
-        }
-    }
-
-    gst_caps_unref(h264);
-    gst_plugin_feature_list_free(filtered);
-    gst_plugin_feature_list_free(encoders);
-    return best_name ? best_name : g_strdup("x264enc");
-}
 
 void rct_gst_recorder_reset(void)
 {
@@ -179,7 +148,7 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
         return;
     }
 
-    gchar *enc = find_best_h264_encoder();
+    gchar *enc = rct_gst_find_h264_encoder();
     g_print("Recording with encoder: %s\n", enc);
 
     // Don't pin the raw format: let videoconvert negotiate whatever the chosen
