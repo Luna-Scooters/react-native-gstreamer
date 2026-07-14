@@ -111,29 +111,7 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     
     if(pipeline)
     {
-        // Always try to get the video-sink by name first (works for both debug and rtspsrc pipelines)
         video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
-        
-        if (!video_sink) {
-            // If no named video-sink found, check if this is a playbin pipeline
-            GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
-            if (!src_element) {
-                GstElement *vbin = gst_parse_bin_from_description(
-                    "vulkanupload ! vulkancolorconvert "
-                    "! vulkansink name=video-sink enable-last-sample=true",
-                    TRUE, NULL);
-                if (vbin) {
-                    g_object_set(GST_OBJECT(pipeline), "video-sink", vbin, NULL);
-                    video_sink = gst_bin_get_by_name(GST_BIN(vbin), "video-sink");
-                } else {
-                    g_printerr("vulkan video-sink bin failed, falling back to glimagesink\n");
-                    video_sink = gst_element_factory_make("glimagesink", "video-sink");
-                    g_object_set(GST_OBJECT(pipeline), "video-sink", video_sink, NULL);
-                }
-            } else {
-                gst_object_unref(src_element);
-            }
-        }
         
         // Configure the video sink if we have one
         if (video_sink) {
@@ -220,16 +198,21 @@ static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpoi
     return TRUE;
 }
 
-// Force TCP protocol
-static void cb_source_setup(GstElement *playbin, GstElement *source, gpointer user_data)
+// Enforces link between sink and src (bug on iOS)
+static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_data)
 {
-    GObjectClass *klass = G_OBJECT_GET_CLASS(source);
-    if (g_object_class_find_property(klass, "protocols"))
-        g_object_set(source, "protocols", 0x4 /* GST_RTSP_LOWER_TRANS_TCP */, NULL);
-    if (g_object_class_find_property(klass, "latency"))
-        g_object_set(source, "latency", 0, NULL);
-    if (g_signal_lookup("select-stream", G_OBJECT_TYPE(source)))
-        g_signal_connect(source, "select-stream", G_CALLBACK(cb_select_stream), NULL);
+    (void)src; (void)user_data;
+    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
+    if (!depay)
+        return;
+    GstPad *sinkpad = gst_element_get_static_pad(depay, "sink");
+    if (!gst_pad_is_linked(sinkpad)) {
+        GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
+        if (GST_PAD_LINK_FAILED(ret))
+            g_printerr("pad-added: rtspsrc -> rtpjpegdepay link failed (%d)\n", ret);
+    }
+    gst_object_unref(sinkpad);
+    gst_object_unref(depay);
 }
 
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
@@ -496,8 +479,13 @@ void rct_gst_init(RctGstConfiguration *configuration)
     video_tee = NULL;
 
 #if defined(__APPLE__)
-    launch_command_app = g_strdup("playbin");
+    const gchar *render_tail =
+        "vulkanupload ! vulkancolorconvert "
+        "! vulkansink name=video-sink enable-last-sample=true";
 #else
+    const gchar *render_tail =
+        "autovideoconvert ! glimagesink sync=false name=video-sink";
+#endif
     gchar *selected_decoder = rct_gst_find_jpeg_decoder();
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
@@ -505,12 +493,10 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "! jpegparse "
         "! %s "
         "! tee name=video-tee "
-        "! queue name=render-queue "
-        "! autovideoconvert "
-        "! glimagesink sync=false name=video-sink";
-    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder);
+        "! queue "
+        "! %s";
+    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder, render_tail);
     g_free(selected_decoder);
-#endif
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -538,9 +524,16 @@ void rct_gst_init(RctGstConfiguration *configuration)
         gst_object_unref(tee);
     }
 
-
-    // Force playbin's internal rtspsrc to TCP (UDP fails on this camera/AP).
-    g_signal_connect(pipeline, "source-setup", G_CALLBACK(cb_source_setup), NULL);
+    // Reject the camera's audio stream at RTSP SETUP time. Critical on iOS: a
+    // dangling (or even set-up) audio stream starves video over the shared
+    // interleaved-TCP connection -> black screen. It also stops the camera from
+    // sending PCMA packets the pipeline would only discard.
+    GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+    if (src_element) {
+        g_signal_connect(src_element, "select-stream", G_CALLBACK(cb_select_stream), NULL);
+        g_signal_connect(src_element, "pad-added", G_CALLBACK(cb_rtsp_pad_added), NULL);
+        gst_object_unref(src_element);
+    }
 
     // Preparing bus
     bus = gst_element_get_bus(pipeline);
@@ -550,10 +543,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);
     gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, pipeline, NULL);
     gst_object_unref(bus);
-
-    // Use fakesink to ignore audio
-    audio_sink = gst_element_factory_make("fakesink", "audio-sink");
-    g_object_set(pipeline, "audio-sink", audio_sink, NULL);
 
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging && pipeline != NULL)

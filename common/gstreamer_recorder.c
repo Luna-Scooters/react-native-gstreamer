@@ -132,6 +132,10 @@ static GstPadProbeReturn record_unlink_probe(GstPad *tee_pad, GstPadProbeInfo *i
 
 void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gint fps)
 {
+    if (file_path == NULL || *file_path == '\0') {
+        g_printerr("start_recording: no output path provided\n");
+        return;
+    }
     if (rct_gst_is_recording()) {
         g_printerr("start_recording: already recording\n");
         return;
