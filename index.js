@@ -107,11 +107,9 @@ export default class GstPlayer extends React.Component {
             this.props.onElementError(source, message, debug_info)
     }
 
-    onRecordingFinished(_message) {
-        const { path } = _message.nativeEvent
-
+    onRecordingFinished() {
         if (this.props.onRecordingFinished)
-            this.props.onRecordingFinished(path)
+            this.props.onRecordingFinished()
     }
 
     shouldComponentUpdate() {

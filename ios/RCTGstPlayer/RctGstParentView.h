@@ -18,5 +18,6 @@
 @property (nonatomic, copy) RCTBubblingEventBlock onUriChanged;
 @property (nonatomic, copy) RCTBubblingEventBlock onEOS;
 @property (nonatomic, copy) RCTBubblingEventBlock onElementError;
+@property (nonatomic, copy) RCTBubblingEventBlock onRecordingFinished;
 
 @end

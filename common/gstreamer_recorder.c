@@ -13,14 +13,12 @@ extern GstElement *video_tee;
 typedef struct {
     GstElement  *bin;            // queue ! ... ! filesink, NULL when idle
     GstPad      *tee_pad;        // requested tee src pad feeding the bin
-    gchar       *file_path;      // owned copy of the output path
     GstClockTime pts_base;       // first PTS seen; rebases the file timeline to 0
     GstState     deferred_state; // pipeline state postponed until finalize completes
     guint        watchdog_id;    // forces teardown if EOS never reaches the filesink
 } RctGstRecorder;
 
 static RctGstRecorder recorder = {
-    .file_path = NULL,
     .pts_base = GST_CLOCK_TIME_NONE,
     .deferred_state = GST_STATE_VOID_PENDING,
     .watchdog_id = 0,
@@ -45,8 +43,6 @@ void rct_gst_recorder_reset(void)
         gst_object_unref(recorder.tee_pad);
         recorder.tee_pad = NULL;
     }
-    g_free(recorder.file_path);
-    recorder.file_path = NULL;
     recorder.pts_base = GST_CLOCK_TIME_NONE;
 }
 
@@ -56,18 +52,15 @@ static gboolean recorder_teardown(gpointer forced_by_watchdog)
     if (forced_by_watchdog)
         g_printerr("Recording finalize timed out, forcing teardown (file may be truncated)\n");
 
-    gchar *finished_path = g_steal_pointer(&recorder.file_path);
     GstState deferred = recorder.deferred_state;
 
     rct_gst_recorder_reset();
     g_print("Recording stopped and file finalized\n");
 
-    if (finished_path) {
-        RctGstConfiguration *cfg = rct_gst_get_configuration();
-        if (cfg->onRecordingFinished)
-            cfg->onRecordingFinished(finished_path);
-        g_free(finished_path);
-    }
+    RctGstConfiguration *cfg = rct_gst_get_configuration();
+    if (cfg->onRecordingFinished)
+        cfg->onRecordingFinished();
+
     // Recording is inactive now, so this cannot re-enter the defer path.
     if (deferred != GST_STATE_VOID_PENDING)
         rct_gst_set_pipeline_state(deferred);
@@ -205,7 +198,6 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
     gst_object_unref(bin_sink);
     gst_element_sync_state_with_parent(recorder.bin);
 
-    recorder.file_path = g_strdup(file_path);
     g_print("Recording started -> %s\n", file_path);
 }
 
@@ -226,7 +218,7 @@ void rct_gst_stop_recording(void)
 
 gboolean rct_gst_is_recording(void)
 {
-    return recorder.file_path != NULL;
+    return recorder.pts_base != GST_CLOCK_TIME_NONE;
 }
 
 void rct_gst_recorder_defer_state(GstState state)

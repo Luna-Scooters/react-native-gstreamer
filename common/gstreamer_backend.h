@@ -36,7 +36,7 @@ typedef struct
     void(*onEOS)(void);                                             // Called when EOS occurs
     void(*onElementError)(gchar *source, gchar *message,            // Called when an error occurs
                           gchar *debug_info);
-    void(*onRecordingFinished)(gchar *file_path);                   // Called when a recording file is finalized
+    void(*onRecordingFinished)();                                   // Called when a recording file is finalized
 } RctGstConfiguration;
 
 // Getters

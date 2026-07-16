@@ -169,11 +169,10 @@ void native_on_element_error(gchar *_source, gchar *_message, gchar *_debug_info
     (*env)->CallVoidMethod(env, app, on_element_error_id, source, message, debug_info);
 }
 
-void native_on_recording_finished(gchar *_file_path)
+void native_on_recording_finished()
 {
     JNIEnv *env = get_jni_env();
-    jstring file_path = (*env)->NewStringUTF(env, _file_path);
-    (*env)->CallVoidMethod(env, app, on_recording_finished_id, file_path);
+    (*env)->CallVoidMethod(env, app, on_recording_finished_id);
 }
 
 static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_configuration)
@@ -198,7 +197,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     on_uri_changed_id = (*env)->GetMethodID(env, klass, "onUriChanged", "(Ljava/lang/String;)V");
     on_eos_id = (*env)->GetMethodID(env, klass, "onEOS", "()V");
     on_element_error_id = (*env)->GetMethodID(env, klass, "onElementError", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-    on_recording_finished_id = (*env)->GetMethodID(env, klass, "onRecordingFinished", "(Ljava/lang/String;)V");
+    on_recording_finished_id = (*env)->GetMethodID(env, klass, "onRecordingFinished", "()V");
 
     configuration->onInit = native_on_init;
     configuration->onStateChanged = native_on_state_changed;
