@@ -40,6 +40,7 @@ RCT_EXPORT_VIEW_PROPERTY(onVolumeChanged, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onUriChanged, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onEOS, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onElementError, RCTBubblingEventBlock)
+RCT_EXPORT_VIEW_PROPERTY(onRecordingFinished, RCTBubblingEventBlock)
 
 // Methods
 RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber *)state) {
@@ -53,6 +54,21 @@ RCT_EXPORT_METHOD(recreateView:(nonnull NSNumber *)reactTag){
 
 RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
     [self->playerController stopImageCapture];
+}
+
+RCT_EXPORT_METHOD(startRecording:(nonnull NSNumber *)reactTag
+                  path:(nonnull NSString *)path
+                  width:(nonnull NSNumber *)width
+                  height:(nonnull NSNumber *)height
+                  fps:(nonnull NSNumber *)fps) {
+    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@ width=%@ height=%@ fps=%@",
+          reactTag, path, width, height, fps);
+    rct_gst_start_recording((const gchar *)[path UTF8String],
+                            [width intValue], [height intValue], [fps intValue]);
+}
+
+RCT_EXPORT_METHOD(stopRecording:(nonnull NSNumber *)reactTag) {
+    rct_gst_stop_recording();
 }
 
 // react-native init
