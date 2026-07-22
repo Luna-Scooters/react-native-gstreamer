@@ -335,6 +335,18 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
         });
 }
 
+void onRecordingFinished() {
+    if (events_queue != NULL)
+        dispatch_async(events_queue, ^{
+            if (currentInstance == nil || currentInstance->_view == nil) {
+                NSLog(@"currentInstance or _view is nil, skipping recording finished event");
+                return;
+            }
+            if (currentInstance->_view.onRecordingFinished)
+                currentInstance->_view.onRecordingFinished(@{});
+        });
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
@@ -351,6 +363,7 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
     configuration->onUriChanged = onUriChanged;
     configuration->onEOS = onEOS;
     configuration->onElementError = onElementError;
+    configuration->onRecordingFinished = onRecordingFinished;
 
     // Preparing pipeline
     rct_gst_init(configuration);

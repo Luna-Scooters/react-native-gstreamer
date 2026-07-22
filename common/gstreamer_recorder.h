@@ -1,0 +1,35 @@
+//
+//  gstreamer_recorder.h
+//
+//  Records the decoded video stream to an MP4 file by attaching a dynamic
+//  branch (queue ! videorate ! videoscale ! videoconvert ! <H.264 encoder> !
+//  h264parse ! mp4mux ! filesink) to the pipeline's "video-tee" element.
+//
+//  Depends on gstreamer_backend.c for the pipeline/tee globals and the
+//  onRecordingFinished callback.
+//
+
+#ifndef gstreamer_recorder_h
+#define gstreamer_recorder_h
+
+#include <gst/gst.h>
+
+// Start recording to file_path (hardware H.264 encoder when available).
+// width/height/fps <= 0 mean "keep the stream's native value".
+void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gint fps);
+
+// Finalize asynchronously: drains the branch, writes the MP4 trailer, then
+// fires onRecordingFinished. Bounded by a 3s watchdog.
+void rct_gst_stop_recording(void);
+
+gboolean rct_gst_is_recording(void);
+
+// Postpone a pipeline state change until the in-progress recording finalizes
+// (applied via rct_gst_set_pipeline_state from the finalize handler).
+void rct_gst_recorder_defer_state(GstState state);
+
+// Drop all recording state, detaching the branch if attached. Must be called
+// before the owning pipeline is destroyed (re-init / terminate).
+void rct_gst_recorder_reset(void);
+
+#endif /* gstreamer_recorder_h */

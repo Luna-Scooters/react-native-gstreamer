@@ -107,6 +107,11 @@ export default class GstPlayer extends React.Component {
             this.props.onElementError(source, message, debug_info)
     }
 
+    onRecordingFinished() {
+        if (this.props.onRecordingFinished)
+            this.props.onRecordingFinished()
+    }
+
     shouldComponentUpdate() {
         return true
     }
@@ -141,6 +146,22 @@ export default class GstPlayer extends React.Component {
         )
     }
 
+    startRecording(path, width = 0, height = 0, fps = 0) {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.startRecording,
+            [path, width, height, fps]
+        )
+    }
+
+    stopRecording() {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.stopRecording,
+            []
+        )
+    }
+
     // Helper methods
     recreateView() {
         UIManager.dispatchViewManagerCommand(
@@ -164,6 +185,7 @@ export default class GstPlayer extends React.Component {
                 onUriChanged={this.onUriChanged.bind(this)}
                 onEOS={this.onEOS.bind(this)}
                 onElementError={this.onElementError.bind(this)}
+                onRecordingFinished={this.onRecordingFinished.bind(this)}
 
                 ref={(playerView) => this.playerViewRef = playerView}
 
@@ -188,6 +210,7 @@ GstPlayer.propTypes = {
     onUriChanged: PropTypes.func,
     onEOS: PropTypes.func,
     onElementError: PropTypes.func,
+    onRecordingFinished: PropTypes.func,
 
     // Methods
     setGstState: PropTypes.func,
@@ -195,6 +218,8 @@ GstPlayer.propTypes = {
     pause: PropTypes.func,
     stop: PropTypes.func,
     stopImageCapture: PropTypes.func,
+    startRecording: PropTypes.func,
+    stopRecording: PropTypes.func,
 
     // Helper methods
     createDrawableSurface: PropTypes.func,

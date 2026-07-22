@@ -16,6 +16,7 @@ static jmethodID on_volume_changed_id;
 static jmethodID on_uri_changed_id;
 static jmethodID on_eos_id;
 static jmethodID on_element_error_id;
+static jmethodID on_recording_finished_id;
 
 // Global context
 pthread_t gst_app_thread;
@@ -111,6 +112,21 @@ static void native_rct_gst_set_debugging(JNIEnv* env, jobject thiz, jboolean is_
     rct_gst_set_debugging(is_debugging);
 }
 
+static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j, jint width, jint height, jint fps)
+{
+    (void)thiz;
+    const char *path = (*env)->GetStringUTFChars(env, path_j, 0);
+    rct_gst_start_recording((const gchar *)path, width, height, fps);
+    (*env)->ReleaseStringUTFChars(env, path_j, path);
+}
+
+static void native_rct_gst_stop_recording(JNIEnv* env, jobject thiz)
+{
+    (void)env;
+    (void)thiz;
+    rct_gst_stop_recording();
+}
+
 
 void native_on_init()
 {
@@ -153,6 +169,12 @@ void native_on_element_error(gchar *_source, gchar *_message, gchar *_debug_info
     (*env)->CallVoidMethod(env, app, on_element_error_id, source, message, debug_info);
 }
 
+void native_on_recording_finished()
+{
+    JNIEnv *env = get_jni_env();
+    (*env)->CallVoidMethod(env, app, on_recording_finished_id);
+}
+
 static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_configuration)
 {
     RctGstConfiguration* configuration = rct_gst_get_configuration();
@@ -175,6 +197,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     on_uri_changed_id = (*env)->GetMethodID(env, klass, "onUriChanged", "(Ljava/lang/String;)V");
     on_eos_id = (*env)->GetMethodID(env, klass, "onEOS", "()V");
     on_element_error_id = (*env)->GetMethodID(env, klass, "onElementError", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+    on_recording_finished_id = (*env)->GetMethodID(env, klass, "onRecordingFinished", "()V");
 
     configuration->onInit = native_on_init;
     configuration->onStateChanged = native_on_state_changed;
@@ -182,6 +205,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     configuration->onUriChanged = native_on_uri_changed;
     configuration->onEOS = native_on_eos;
     configuration->onElementError = native_on_element_error;
+    configuration->onRecordingFinished = native_on_recording_finished;
 
     rct_gst_init(configuration);
 
@@ -198,7 +222,10 @@ static JNINativeMethod native_methods[] = {
         { "nativeRCTGstSetDrawableSurface", "(Landroid/view/Surface;)V", (void *) native_rct_gst_set_drawable_surface },
         { "nativeRCTGstSetUri", "(Ljava/lang/String;)V", (void *) native_rct_gst_set_uri },
         { "nativeRCTGstSetAudioLevelRefreshRate", "(I)V", (void *) native_rct_gst_set_audio_level_refresh_rate },
-        { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging }
+        { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging },
+
+        { "nativeRCTGstStartRecording", "(Ljava/lang/String;III)V", (void *) native_rct_gst_start_recording },
+        { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording }
 };
 
 // Called by JNI

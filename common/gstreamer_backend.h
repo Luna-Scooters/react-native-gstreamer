@@ -36,6 +36,7 @@ typedef struct
     void(*onEOS)(void);                                             // Called when EOS occurs
     void(*onElementError)(gchar *source, gchar *message,            // Called when an error occurs
                           gchar *debug_info);
+    void(*onRecordingFinished)();                                   // Called when a recording file is finalized
 } RctGstConfiguration;
 
 // Getters
@@ -58,5 +59,7 @@ gchar *rct_gst_get_info();
 void apply_uri();
 
 GstSample *rct_gst_pull_last_sample(void);
+
+#include "gstreamer_recorder.h"
 
 #endif /* gstreamer_backend_h */
