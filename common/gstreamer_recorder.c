@@ -158,10 +158,12 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
     // Fragmented MP4 (1s fragments): media hits the disk continuously, so a crash,
     // kill or forced teardown mid-ride still leaves a playable file. faststart
     // would buffer everything and only write at EOS — any interruption = 0 bytes.
+    // Force H.264 High profile for better compression.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "videorate ! videoscale ! videoconvert ! %s ! "
-        "%s ! h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
+        "%s name=venc ! video/x-h264,profile=high ! "
+        "h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
         "filesink name=recsink async=false location=\"%s\"",
         caps->str, enc, file_path);
 
@@ -175,6 +177,20 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
                    error ? error->message : "unknown");
         if (error) g_error_free(error);
         return;
+    }
+
+    // Shrink the file: 3s keyframe interval (fewer I-frames) + a capped bitrate.
+    GstElement *venc = gst_bin_get_by_name(GST_BIN(recorder.bin), "venc");
+    if (venc) {
+        gint bitrate_kbps = 1500;
+        if (width > 0 && height > 0) {
+            gint rate = (fps > 0) ? fps : 30;
+            gdouble bits = (gdouble)width * height * rate * 0.15;
+            bitrate_kbps = (gint)(bits / 1000.0);
+            bitrate_kbps = CLAMP(bitrate_kbps, 500, 4000);
+        }
+        rct_gst_configure_h264_encoder(venc, fps, 3, bitrate_kbps);
+        gst_object_unref(venc);
     }
 
     GstElement *recsink = gst_bin_get_by_name(GST_BIN(recorder.bin), "recsink");
