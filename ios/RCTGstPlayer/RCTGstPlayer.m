@@ -57,14 +57,9 @@ RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
 }
 
 RCT_EXPORT_METHOD(startRecording:(nonnull NSNumber *)reactTag
-                  path:(nonnull NSString *)path
-                  width:(nonnull NSNumber *)width
-                  height:(nonnull NSNumber *)height
-                  fps:(nonnull NSNumber *)fps) {
-    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@ width=%@ height=%@ fps=%@",
-          reactTag, path, width, height, fps);
-    rct_gst_start_recording((const gchar *)[path UTF8String],
-                            [width intValue], [height intValue], [fps intValue]);
+                  path:(nonnull NSString *)path) {
+    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@", reactTag, path);
+    rct_gst_start_recording((const gchar *)[path UTF8String]);
 }
 
 RCT_EXPORT_METHOD(stopRecording:(nonnull NSNumber *)reactTag) {

@@ -16,7 +16,7 @@
 
 // Start recording to file_path (hardware H.264 encoder when available).
 // width/height/fps <= 0 mean "keep the stream's native value".
-void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gint fps);
+void rct_gst_start_recording(const gchar *file_path);
 
 // Finalize asynchronously: drains the branch, writes the MP4 trailer, then
 // fires onRecordingFinished. Bounded by a 3s watchdog.

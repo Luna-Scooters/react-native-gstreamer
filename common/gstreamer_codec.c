@@ -64,10 +64,8 @@ void rct_gst_configure_h264_encoder(GstElement *encoder, gint fps,
                                     gint keyframe_interval_sec,
                                     gint bitrate_kbps)
 {
-    if (encoder == NULL)
+    if (encoder == NULL || fps <= 0)
         return;
-    if (fps <= 0)
-        return
 
     GObjectClass *klass = G_OBJECT_GET_CLASS(encoder);
 
