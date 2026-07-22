@@ -141,6 +141,39 @@ GstSample *rct_gst_pull_last_sample(void)
     return sample;
 }
 
+// Read the decoded stream's resolution and framerate
+// Returns TRUE if width/height were resolved.
+gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps)
+{
+    if (!video_tee)
+        return FALSE;
+
+    GstPad *sinkpad = gst_element_get_static_pad(video_tee, "sink");
+    if (!sinkpad)
+        return FALSE;
+    GstCaps *caps = gst_pad_get_current_caps(sinkpad);
+    gst_object_unref(sinkpad);
+    if (!caps)
+        return FALSE;
+
+    const GstStructure *s = gst_caps_get_structure(caps, 0);
+    gint w = 0, h = 0, fps_n = 0, fps_d = 1;
+    gboolean ok = FALSE;
+
+    if (gst_structure_get_int(s, "width", &w) &&
+        gst_structure_get_int(s, "height", &h)) {
+        if (width)  *width = w;
+        if (height) *height = h;
+        ok = TRUE;
+    }
+    if (fps && gst_structure_get_fraction(s, "framerate", &fps_n, &fps_d) &&
+        fps_n > 0 && fps_d > 0)
+        *fps = fps_n / fps_d;
+
+    gst_caps_unref(caps);
+    return ok;
+}
+
 /**********************
  AUDIO HANDLING METHODS
  *********************/

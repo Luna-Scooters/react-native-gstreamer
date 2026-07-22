@@ -145,6 +145,10 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
         return;
     }
 
+    if (rct_gst_get_video_info(&width, &height, &fps))
+        g_print("Recording using camera stream info: %dx%d @ %dfps\n",
+                width, height, fps);
+
     gchar *enc = rct_gst_find_h264_encoder();
     g_print("Recording with encoder: %s\n", enc);
 
