@@ -214,6 +214,8 @@ void rct_gst_start_recording(const gchar *file_path)
     // Attach the branch to the tee, live. The stamp probe (rebase/PTS repair)
     // rides on the requested pad and dies with it.
     gst_bin_add(GST_BIN(pipeline), recorder.bin);
+    gst_element_sync_state_with_parent(recorder.bin);
+    gst_element_get_state(recorder.bin, NULL, NULL, GST_SECOND);
     recorder.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
     gst_pad_add_probe(recorder.tee_pad, GST_PAD_PROBE_TYPE_BUFFER,
                       record_stamp_probe, NULL, NULL);
@@ -225,7 +227,6 @@ void rct_gst_start_recording(const gchar *file_path)
         return;
     }
     gst_object_unref(bin_sink);
-    gst_element_sync_state_with_parent(recorder.bin);
 
     g_print("Recording started -> %s\n", file_path);
 }
