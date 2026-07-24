@@ -170,11 +170,10 @@ void rct_gst_start_recording(const gchar *file_path)
     // Fragmented MP4 (1s fragments): media hits the disk continuously, so a crash,
     // kill or forced teardown mid-ride still leaves a playable file. faststart
     // would buffer everything and only write at EOS — any interruption = 0 bytes.
-    // Force H.264 High profile for better compression.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "videorate ! videoconvert ! %s ! "
-        "%s name=venc ! video/x-h264,profile=high ! "
+        "%s name=venc ! "
         "h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
         "filesink name=recsink async=false location=\"%s\"",
         caps->str, enc, file_path);
