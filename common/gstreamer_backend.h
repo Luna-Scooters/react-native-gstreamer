@@ -42,6 +42,7 @@ typedef struct
 // Getters
 RctGstConfiguration *rct_gst_get_configuration();
 RctGstAudioLevel *rct_gst_get_audio_level();
+GstElement *rct_gst_get_pipeline(void);
 
 // Setters
 void rct_gst_set_drawable_surface(guintptr _drawableSurface);

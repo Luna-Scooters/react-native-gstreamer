@@ -69,6 +69,11 @@ RctGstAudioLevel *rct_gst_get_audio_level()
     return audio_level;
 }
 
+GstElement *rct_gst_get_pipeline(void)
+{
+    return pipeline;
+}
+
 // Setters
 void rct_gst_set_uri(gchar* _uri)
 {

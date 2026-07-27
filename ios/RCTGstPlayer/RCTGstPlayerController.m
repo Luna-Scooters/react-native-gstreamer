@@ -42,6 +42,9 @@ NSNumber* newState;
 dispatch_queue_t background_queue = NULL;
 dispatch_queue_t events_queue;
 
+static GstVulkanInstance *sharedVkInstance = NULL;
+static GstVulkanDevice   *sharedVkDevice   = NULL;
+
 // Generate custom view to return to react-native (for events handle)
 @dynamic view;
 - (void)loadView {
@@ -115,6 +118,18 @@ dispatch_queue_t events_queue;
 {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
+            GstElement *p = rct_gst_get_pipeline();
+            if (sharedVkDevice && p) {
+                GstContext *instace_ctx = gst_context_new(GST_VULKAN_INSTANCE_CONTEXT_TYPE_STR, TRUE);
+                gst_context_set_vulkan_instance(instace_ctx, sharedVkInstance);
+                gst_element_set_context(instace_ctx);
+                gst_context_unref(instace_ctx);
+
+                GstContext *device_ctx = gst_context_new(GST_VULKAN_DEVICE_CONTEXT_TYPE_STR, TRUE);
+                gst_context_set_vulkan_device(device_ctx, sharedVkDevice);
+                gst_element_set_context(p, device_ctx);
+                gst_context_unref(device_ctx);
+            }
             rct_gst_set_pipeline_state(GST_STATE_PLAYING);
             [self startImageCaptureThread];
         });
@@ -151,6 +166,11 @@ static void capLogOnce(int st, NSString *msg) {
     }
 
     GstVulkanImageMemory *vkmem = (GstVulkanImageMemory *)mem;
+    // Capture the sink's VkInstance/VkDevice once and hold a reference
+    if (!sharedVkDevice && vkmem->device) {
+        sharedVkDevice   = (GstVulkanDevice *)gst_object_ref(vkmem->device);
+        sharedVkInstance = gst_vulkan_device_get_instance(sharedVkDevice);
+    }
     // Call MoltenVK's exporter directly: the symbol is in libGStreamer.a, but it's not
     // in the device dispatch table (VK_MVK_moltenvk isn't enabled), so the proc-address
     // lookup returns NULL. (Deprecated API, but the simplest VkImage -> MTLTexture path.)
