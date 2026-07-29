@@ -55,9 +55,19 @@ gchar *rct_gst_find_jpeg_decoder(void)
 
 gchar *rct_gst_find_h264_encoder(void)
 {
-    return find_best_element(
+    gchar *name = find_best_element(
         GST_ELEMENT_FACTORY_TYPE_ENCODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
         "video/x-h264", GST_PAD_SRC, "x264enc");
+
+    // MediaTek's amc H.264 encoder not working
+    // Fallback to software encoder
+    if (name && g_strstr_len(name, -1, "mtk")) {
+        g_print("H264 encoder [%s] is the broken MediaTek amc encoder; "
+                "using software x264enc instead\n", name);
+        g_free(name);
+        name = g_strdup("x264enc");
+    }
+    return name;
 }
 
 void rct_gst_configure_h264_encoder(GstElement *encoder, gint fps,
