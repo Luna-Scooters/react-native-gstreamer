@@ -21,20 +21,19 @@
 
 #include "gstreamer_event_recorder.h"
 #include "gstreamer_backend.h"
-#include "gstreamer_codec.h"
+#include "gstreamer_encoder.h"
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
-extern GstElement *video_tee;
 
 #define EVR_PRE_NS   (5 * GST_SECOND)
 #define EVR_POST_NS  (7 * GST_SECOND)
 #define EVR_FKU_MS   1000            // force a keyframe every second
-#define EVR_FPS      10
 
 typedef struct {
     GstElement  *bin;          // encode + appsink branch, NULL when disarmed
-    GstPad      *tee_pad;      // requested tee src pad feeding the bin
+    GstElement  *enc_tee;      // shared encoder's tee we requested a pad from (borrowed)
+    GstPad      *tee_pad;      // requested enc-tee src pad feeding the bin
     GstElement  *appsink;      // borrowed (owned by bin)
     guint        fku_timer_id; // periodic force-key-unit
 
@@ -309,24 +308,26 @@ void rct_gst_event_recorder_set_buffering(gboolean enable)
     }
     if (eventRecorder.bin)
         return;  // already buffering
-    if (!video_tee || !pipeline) {
-        g_printerr("event_recorder: no video-tee available (pipeline not ready)\n");
+    if (!pipeline) {
+        g_printerr("event_recorder: pipeline not ready\n");
         return;
     }
 
-    gchar *enc = rct_gst_find_h264_encoder();
-    g_print("Event recorder buffering with encoder: %s\n", enc);
+    GstElement *enc_tee = rct_gst_encoder_acquire();
+    if (!enc_tee) {
+        g_printerr("event_recorder: shared encoder unavailable (pipeline not ready)\n");
+        return;
+    }
+    eventRecorder.enc_tee = enc_tee;
+
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=%" G_GUINT64_FORMAT " leaky=downstream ! "
-        "videorate ! videoconvert ! video/x-raw,framerate=%d/1 ! "
-        "%s name=evrenc ! h264parse config-interval=-1 ! "
         "appsink name=evrsink emit-signals=true sync=false max-buffers=2 drop=false",
-        (guint64)(EVR_PRE_NS + EVR_POST_NS + GST_SECOND), EVR_FPS, enc);
+        (guint64)(EVR_PRE_NS + EVR_POST_NS + GST_SECOND));
 
     GError *error = NULL;
     eventRecorder.bin = gst_parse_bin_from_description(desc, TRUE, &error);
     g_free(desc);
-    g_free(enc);
     if (!eventRecorder.bin) {
         g_printerr("event_recorder: branch build failed: %s\n", error ? error->message : "?");
         if (error) g_error_free(error);
@@ -340,7 +341,7 @@ void rct_gst_event_recorder_set_buffering(gboolean enable)
     }
 
     gst_bin_add(GST_BIN(pipeline), eventRecorder.bin);
-    eventRecorder.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
+    eventRecorder.tee_pad = gst_element_request_pad_simple(enc_tee, "src_%u");
     GstPad *bin_sink = gst_element_get_static_pad(eventRecorder.bin, "sink");
     if (gst_pad_link(eventRecorder.tee_pad, bin_sink) != GST_PAD_LINK_OK) {
         g_printerr("event_recorder: failed to link tee -> branch\n");
@@ -412,11 +413,15 @@ void rct_gst_event_recorder_reset(void)
         }
         eventRecorder.bin = NULL;
     }
-    if (eventRecorder.tee_pad) {
-        if (video_tee)
-            gst_element_release_request_pad(video_tee, eventRecorder.tee_pad);
-        gst_object_unref(eventRecorder.tee_pad);
+    if (eventRecorder.enc_tee) {
+        if (eventRecorder.tee_pad)
+            gst_element_release_request_pad(eventRecorder.enc_tee, eventRecorder.tee_pad);
         eventRecorder.tee_pad = NULL;
+
+        eventRecorder.enc_tee = NULL;
+        gst_object_unref(eventRecorder.enc_tee);
+        rct_gst_encoder_release();
+        
     }
     eventRecorder.appsink = NULL;
 

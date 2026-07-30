@@ -4,23 +4,18 @@
 
 #include "gstreamer_recorder.h"
 #include "gstreamer_backend.h"
-#include "gstreamer_codec.h"
+#include "gstreamer_encoder.h"
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
-extern GstElement *video_tee;
 
-static const gint FALLBACK_WIDTH = 360;
-static const gint FALLBACK_HEIGHT = 360;
-static const gint FALLBACK_FPS = 10;
-static const gdouble BITS_PER_PIXEL = 0.1;
-static const gint KEYFRAME_INTERVAL_SEC = 3;
 static const GstClockTime RECORD_BIN_STATE_TIMEOUT = 100 * GST_MSECOND;
 
 
 typedef struct {
-    GstElement  *bin;            // queue ! ... ! filesink, NULL when idle
-    GstPad      *tee_pad;        // requested tee src pad feeding the bin
+    GstElement  *bin;            // queue ! mp4mux ! filesink, NULL when idle
+    GstElement  *enc_tee;        // shared encoder's tee we requested a pad from (borrowed)
+    GstPad      *tee_pad;        // requested enc-tee src pad feeding the bin
     GstClockTime pts_base;       // first PTS seen; rebases the file timeline to 0
     GstState     deferred_state; // pipeline state postponed until finalize completes
     guint        watchdog_id;    // forces teardown if EOS never reaches the filesink
@@ -45,11 +40,15 @@ void rct_gst_recorder_reset(void)
             gst_bin_remove(GST_BIN(pipeline), recorder.bin);
         recorder.bin = NULL;
     }
-    if (recorder.tee_pad) {
-        if (video_tee)
-            gst_element_release_request_pad(video_tee, recorder.tee_pad);
-        gst_object_unref(recorder.tee_pad);
-        recorder.tee_pad = NULL;
+    if (recorder.enc_tee) {
+        if (recorder.tee_pad) {
+            gst_element_release_request_pad(recorder.enc_tee, recorder.tee_pad);
+            recorder.tee_pad = NULL;
+        }
+
+        gst_object_unref(recorder.enc_tee);
+        recorder.enc_tee = NULL;
+        rct_gst_encoder_release();
     }
     recorder.pts_base = GST_CLOCK_TIME_NONE;
 }
@@ -87,8 +86,9 @@ static GstPadProbeReturn record_eos_probe(GstPad *pad, GstPadProbeInfo *info, gp
     return GST_PAD_PROBE_REMOVE;
 }
 
-// Repair and rebase timestamps on buffers entering the record branch
-// - The first PTS becomes the file's t=0
+// Rebase the file timeline so it starts at 0. Buffers are already encoded H.264
+// with valid PTS/DTS (PTS repair happened at the shared encoder's input), so we
+// only shift by the first PTS — shifting DTS by the same base to stay monotonic.
 static GstPadProbeReturn record_stamp_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
     (void)pad; (void)user_data;
@@ -97,34 +97,25 @@ static GstPadProbeReturn record_stamp_probe(GstPad *pad, GstPadProbeInfo *info, 
         return GST_PAD_PROBE_OK;
 
     GstClockTime pts = GST_BUFFER_PTS(buffer);
-
-    if (pts == GST_CLOCK_TIME_NONE) {
-        if (!pipeline)
-            return GST_PAD_PROBE_OK;
-        GstClock *clock = gst_element_get_clock(pipeline);
-        if (!clock)
-            return GST_PAD_PROBE_OK;
-        GstClockTime now = gst_clock_get_time(clock);
-        GstClockTime base = gst_element_get_base_time(pipeline);
-        gst_object_unref(clock);
-        if (now == GST_CLOCK_TIME_NONE || base == GST_CLOCK_TIME_NONE || now < base)
-            return GST_PAD_PROBE_OK;
-        pts = now - base;
-    }
+    if (!GST_CLOCK_TIME_IS_VALID(pts))
+        return GST_PAD_PROBE_OK;
 
     if (recorder.pts_base == GST_CLOCK_TIME_NONE)
         recorder.pts_base = pts;
-    pts = (pts > recorder.pts_base) ? pts - recorder.pts_base : 0;
+    GstClockTime base = recorder.pts_base;
 
     buffer = gst_buffer_make_writable(buffer);
-    GST_BUFFER_PTS(buffer) = pts;
-    GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+    GST_BUFFER_PTS(buffer) = (pts > base) ? pts - base : 0;
+    if (GST_BUFFER_DTS_IS_VALID(buffer)) {
+        GstClockTime dts = GST_BUFFER_DTS(buffer);
+        GST_BUFFER_DTS(buffer) = (dts > base) ? dts - base : 0;
+    }
     GST_PAD_PROBE_INFO_DATA(info) = buffer;
     return GST_PAD_PROBE_OK;
 }
 
 // Fires when the tee src pad is idle: unlink the branch and push EOS into it so
-// mp4mux finalizes the file. Rendering keeps flowing through the other tee pad.
+// mp4mux finalizes the file. The encoder keeps running for other consumers.
 static GstPadProbeReturn record_unlink_probe(GstPad *tee_pad, GstPadProbeInfo *info, gpointer user_data)
 {
     (void)info; (void)user_data;
@@ -148,57 +139,36 @@ void rct_gst_start_recording(const gchar *file_path)
         g_printerr("start_recording: already recording\n");
         return;
     }
-    if (!video_tee || !pipeline) {
-        g_printerr("start_recording: no video-tee available (pipeline not ready)\n");
+    if (!pipeline) {
+        g_printerr("start_recording: pipeline not ready\n");
         return;
     }
 
-    gint width = FALLBACK_WIDTH;
-    gint height = FALLBACK_HEIGHT;
-    gint fps = FALLBACK_FPS;
-    if (rct_gst_get_video_info(&width, &height, &fps))
-        g_print("Recording using camera stream info: %dx%d @ %dfps\n",
-                width, height, fps);
-
-    gchar *enc = rct_gst_find_h264_encoder();
-    g_print("Recording with encoder: %s\n", enc);
-
-    // Don't pin the raw format: let videoconvert negotiate whatever the chosen
-    // encoder accepts (amcvidenc prefers NV12, x264enc prefers I420, etc.).
-    GString *caps = g_string_new("video/x-raw");
-    g_string_append_printf(caps, ",framerate=%d/1", fps);
+    // Bring up (or join) the shared encoder and attach our mux branch to its tee.
+    GstElement *enc_tee = rct_gst_encoder_acquire();
+    if (!enc_tee) {
+        g_printerr("start_recording: shared encoder unavailable (pipeline not ready)\n");
+        return;
+    }
+    recorder.enc_tee = enc_tee;
 
     // Fragmented MP4 (1s fragments): media hits the disk continuously, so a crash,
-    // kill or forced teardown mid-ride still leaves a playable file. faststart
-    // would buffer everything and only write at EOS — any interruption = 0 bytes.
+    // kill or forced teardown mid-ride still leaves a playable file.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
-        "videorate ! videoconvert ! %s ! "
-        "%s name=venc ! "
-        "h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
+        "mp4mux fragment-duration=1000 ! "
         "filesink name=recsink async=false location=\"%s\"",
-        caps->str, enc, file_path);
+        file_path);
 
     GError *error = NULL;
     recorder.bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    g_string_free(caps, TRUE);
     g_free(desc);
-    g_free(enc);
     if (!recorder.bin) {
         g_printerr("start_recording: failed to build record bin: %s\n",
                    error ? error->message : "unknown");
         if (error) g_error_free(error);
+        rct_gst_recorder_reset();
         return;
-    }
-
-    // Shrink the file: 3s keyframe interval (fewer I-frames) + a capped bitrate.
-    GstElement *venc = gst_bin_get_by_name(GST_BIN(recorder.bin), "venc");
-    if (venc) {
-        gdouble bits = (gdouble)width * height * fps * BITS_PER_PIXEL;
-        gint bitrate_kbps = (gint)(bits / 1000.0);
-        bitrate_kbps = CLAMP(bitrate_kbps, 500, 4000);
-        rct_gst_configure_h264_encoder(venc, fps, KEYFRAME_INTERVAL_SEC, bitrate_kbps);
-        gst_object_unref(venc);
     }
 
     GstElement *recsink = gst_bin_get_by_name(GST_BIN(recorder.bin), "recsink");
@@ -210,7 +180,7 @@ void rct_gst_start_recording(const gchar *file_path)
         gst_object_unref(recsink);
     }
 
-    // Attach the branch to the tee, live. The stamp probe (rebase/PTS repair)
+    // Attach the mux branch to the shared encoder's tee, live. The rebase probe
     // rides on the requested pad and dies with it.
     gst_bin_add(GST_BIN(pipeline), recorder.bin);
     gst_element_sync_state_with_parent(recorder.bin);
@@ -225,12 +195,12 @@ void rct_gst_start_recording(const gchar *file_path)
         g_printerr("start_recording: record bin still changing state after %dms, "
                    "linking anyway\n", (gint)(RECORD_BIN_STATE_TIMEOUT / GST_MSECOND));
     }
-    recorder.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
+    recorder.tee_pad = gst_element_request_pad_simple(enc_tee, "src_%u");
     gst_pad_add_probe(recorder.tee_pad, GST_PAD_PROBE_TYPE_BUFFER,
                       record_stamp_probe, NULL, NULL);
     GstPad *bin_sink = gst_element_get_static_pad(recorder.bin, "sink");
     if (gst_pad_link(recorder.tee_pad, bin_sink) != GST_PAD_LINK_OK) {
-        g_printerr("start_recording: failed to link tee -> record bin\n");
+        g_printerr("start_recording: failed to link enc-tee -> record bin\n");
         gst_object_unref(bin_sink);
         rct_gst_recorder_reset();
         return;

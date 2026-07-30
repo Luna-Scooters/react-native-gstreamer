@@ -11,6 +11,7 @@ LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../../../../common
 
 LOCAL_SRC_FILES := rctgstplayer.c \
                    $(LOCAL_PATH)/../../../../../common/gstreamer_backend.c \
+                   $(LOCAL_PATH)/../../../../../common/gstreamer_encoder.c \
                    $(LOCAL_PATH)/../../../../../common/gstreamer_recorder.c \
                    $(LOCAL_PATH)/../../../../../common/gstreamer_event_recorder.c \
                    $(LOCAL_PATH)/../../../../../common/gstreamer_codec.c

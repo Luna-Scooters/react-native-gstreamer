@@ -7,9 +7,6 @@
 //  BEFORE the trigger plus the seconds after. The buffer holds encoded access
 //  units (whole GOPs) in memory, so no re-encode happens on save.
 //
-//  Independent of the continuous ride recorder (gstreamer_recorder.c): it owns
-//  its own encode branch. See the header note about concurrent HW encoders.
-//
 
 #ifndef gstreamer_event_recorder_h
 #define gstreamer_event_recorder_h
