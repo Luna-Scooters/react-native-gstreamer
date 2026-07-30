@@ -15,6 +15,7 @@ static const gint FALLBACK_HEIGHT = 360;
 static const gint FALLBACK_FPS = 10;
 static const gdouble BITS_PER_PIXEL = 0.1;
 static const gint KEYFRAME_INTERVAL_SEC = 3;
+static const GstClockTime RECORD_BIN_STATE_TIMEOUT = 100 * GST_MSECOND;
 
 
 typedef struct {
@@ -213,7 +214,17 @@ void rct_gst_start_recording(const gchar *file_path)
     // rides on the requested pad and dies with it.
     gst_bin_add(GST_BIN(pipeline), recorder.bin);
     gst_element_sync_state_with_parent(recorder.bin);
-    gst_element_get_state(recorder.bin, NULL, NULL, GST_SECOND);
+    GstStateChangeReturn state_ret =
+        gst_element_get_state(recorder.bin, NULL, NULL, RECORD_BIN_STATE_TIMEOUT);
+    if (state_ret == GST_STATE_CHANGE_FAILURE) {
+        g_printerr("start_recording: record bin failed to start, aborting\n");
+        rct_gst_recorder_reset();
+        return;
+    }
+    else if (state_ret == GST_STATE_CHANGE_ASYNC) {
+        g_printerr("start_recording: record bin still changing state after %dms, "
+                   "linking anyway\n", (gint)(RECORD_BIN_STATE_TIMEOUT / GST_MSECOND));
+    }
     recorder.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
     gst_pad_add_probe(recorder.tee_pad, GST_PAD_PROBE_TYPE_BUFFER,
                       record_stamp_probe, NULL, NULL);

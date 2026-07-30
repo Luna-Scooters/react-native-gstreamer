@@ -16,32 +16,24 @@ static gchar *find_best_element(GstElementFactoryListType type,
                                 GstPadDirection direction,
                                 const gchar *fallback)
 {
-    GList *factories = gst_element_factory_list_get_elements(type, GST_RANK_MARGINAL);
     GstCaps *caps = gst_caps_from_string(caps_str);
-    GList *filtered = gst_element_factory_list_filter(factories, caps, direction, FALSE);
+    GstElementFactoryListType tiers[2] = {
+        type | GST_ELEMENT_FACTORY_TYPE_HARDWARE, // hardware first
+        type,                                     // then software
+    };
 
-    gchar *best_name = NULL;
-    guint best_rank = 0;
-    gboolean best_hw = FALSE;
-    for (GList *l = filtered; l != NULL; l = l->next) {
-        GstElementFactory *f = GST_ELEMENT_FACTORY(l->data);
-        const gchar *klass = gst_element_factory_get_metadata(f, GST_ELEMENT_METADATA_KLASS);
-        gboolean hw = (klass && g_strstr_len(klass, -1, "Hardware")) ? TRUE : FALSE;
-        guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(f));
-        gboolean better = (best_name == NULL) || (hw && !best_hw) ||
-                          (hw == best_hw && rank > best_rank);
-        if (better) {
-            g_free(best_name);
-            best_name = g_strdup(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f)));
-            best_rank = rank;
-            best_hw = hw;
-        }
+    gchar *name = NULL;
+    for (gint i = 0; i < 2 && name == NULL; i++) {
+        GList *factories = gst_element_factory_list_get_elements(tiers[i], GST_RANK_MARGINAL);
+        GList *filtered = gst_element_factory_list_filter(factories, caps, direction, FALSE);
+        if (filtered)
+            name = g_strdup(gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(filtered->data)));
+        gst_plugin_feature_list_free(filtered);
+        gst_plugin_feature_list_free(factories);
     }
 
     gst_caps_unref(caps);
-    gst_plugin_feature_list_free(filtered);
-    gst_plugin_feature_list_free(factories);
-    return best_name ? best_name : g_strdup(fallback);
+    return name ? name : g_strdup(fallback);
 }
 
 gchar *rct_gst_find_jpeg_decoder(void)
