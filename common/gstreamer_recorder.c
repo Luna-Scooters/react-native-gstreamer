@@ -13,8 +13,8 @@ extern GstElement *video_tee;
 static const gint FALLBACK_WIDTH = 360;
 static const gint FALLBACK_HEIGHT = 360;
 static const gint FALLBACK_FPS = 10;
-static const gdouble BITS_PER_PIXEL = 0.5;
-static const gdouble KEYFRAME_INTERVAL_SEC = 3.0;
+static const gdouble BITS_PER_PIXEL = 0.1;
+static const gint KEYFRAME_INTERVAL_SEC = 3;
 
 
 typedef struct {
@@ -193,8 +193,7 @@ void rct_gst_start_recording(const gchar *file_path)
     // Shrink the file: 3s keyframe interval (fewer I-frames) + a capped bitrate.
     GstElement *venc = gst_bin_get_by_name(GST_BIN(recorder.bin), "venc");
     if (venc) {
-        gint rate = (fps > 0) ? fps : 30;
-        gdouble bits = (gdouble)width * height * rate * BITS_PER_PIXEL;
+        gdouble bits = (gdouble)width * height * fps * BITS_PER_PIXEL;
         gint bitrate_kbps = (gint)(bits / 1000.0);
         bitrate_kbps = CLAMP(bitrate_kbps, 500, 4000);
         rct_gst_configure_h264_encoder(venc, fps, KEYFRAME_INTERVAL_SEC, bitrate_kbps);

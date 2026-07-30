@@ -57,15 +57,15 @@ gchar *rct_gst_find_h264_encoder(void)
 {
     gchar *name = find_best_element(
         GST_ELEMENT_FACTORY_TYPE_ENCODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-        "video/x-h264", GST_PAD_SRC, "x264enc");
+        "video/x-h264", GST_PAD_SRC, "openh264enc");
 
     // MediaTek's amc H.264 encoder not working
     // Fallback to software encoder
     if (name && g_strstr_len(name, -1, "mtk")) {
         g_print("H264 encoder [%s] is the broken MediaTek amc encoder; "
-                "using software x264enc instead\n", name);
+                "using software openh264enc instead\n", name);
         g_free(name);
-        name = g_strdup("x264enc");
+        name = g_strdup("openh264enc");
     }
     return name;
 }
