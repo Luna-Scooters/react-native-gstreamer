@@ -58,7 +58,7 @@ public class RCTGstPlayer extends SimpleViewManager {
             this.playerController.setRctGstState(args.getInt(0));
 
         if (Command.is(commandType, Command.startRecording))
-            this.playerController.startRecording(args.getString(0));
+            this.playerController.startRecording(args.getString(0), args.getInt(1), args.getInt(2));
 
         if (Command.is(commandType, Command.stopRecording))
             this.playerController.stopRecording();

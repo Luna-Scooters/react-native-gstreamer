@@ -5,6 +5,7 @@
 #include <android/native_window_jni.h>
 #include <gst/gst.h>
 #include <gstreamer_backend.h>
+#include <gstreamer_event_recorder.h>
 #include <pthread.h>
 
 ANativeWindow *native_window;
@@ -113,11 +114,12 @@ static void native_rct_gst_set_debugging(JNIEnv* env, jobject thiz, jboolean is_
     rct_gst_set_debugging(is_debugging);
 }
 
-static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j)
+static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j, jint video_event_pre_length, jint video_event_post_length)
 {
     (void)thiz;
     const char *path = (*env)->GetStringUTFChars(env, path_j, 0);
     rct_gst_start_recording((const gchar *)path);
+    rct_gst_event_recorder_set_buffering(TRUE, (gint)video_event_pre_length, (gint)video_event_post_length);
     (*env)->ReleaseStringUTFChars(env, path_j, path);
 }
 
@@ -243,7 +245,7 @@ static JNINativeMethod native_methods[] = {
         { "nativeRCTGstSetAudioLevelRefreshRate", "(I)V", (void *) native_rct_gst_set_audio_level_refresh_rate },
         { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging },
 
-        { "nativeRCTGstStartRecording", "(Ljava/lang/String;)V", (void *) native_rct_gst_start_recording },
+        { "nativeRCTGstStartRecording", "(Ljava/lang/String;II)V", (void *) native_rct_gst_start_recording },
         { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording },
         { "nativeRCTGstSaveEvent", "(Ljava/lang/String;)V", (void *) native_rct_gst_save_event }
 };

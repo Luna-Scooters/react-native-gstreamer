@@ -151,11 +151,11 @@ export default class GstPlayer extends React.Component {
         )
     }
 
-    startRecording(path) {
+    startRecording(path, videoEventPreLength, videoEventPostLength) {
         UIManager.dispatchViewManagerCommand(
             this.playerHandle,
             UIManager.RCTGstPlayer.Commands.startRecording,
-            [path]
+            [path, videoEventPreLength, videoEventPostLength]
         )
     }
 

@@ -58,9 +58,12 @@ RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
 }
 
 RCT_EXPORT_METHOD(startRecording:(nonnull NSNumber *)reactTag
-                  path:(nonnull NSString *)path) {
-    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@", reactTag, path);
+                  path:(nonnull NSString *)path
+                  videoEventPreLength:(nonnull NSNumber *)videoEventPreLength
+                  videoEventPostLength:(nonnull NSNumber *)videoEventPostLength) {
+    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@ eventPreLength=%@ eventPostLength=%@", reactTag, path, videoEventPreLength, videoEventPostLength);
     rct_gst_start_recording((const gchar *)[path UTF8String]);
+    rct_gst_event_recorder_set_buffering(TRUE, [videoEventPreLength intValue], [videoEventPostLength intValue]);
 }
 
 RCT_EXPORT_METHOD(stopRecording:(nonnull NSNumber *)reactTag) {

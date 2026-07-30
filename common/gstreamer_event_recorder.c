@@ -3,8 +3,12 @@
 //
 //  See gstreamer_event_recorder.h.
 //
-//  Data flow:
-//    video-tee ! queue ! videorate(10fps) ! videoconvert ! <h264 enc> ! h264parse ! appsink
+//  Data flow: taps the shared H.264 encoder (gstreamer_encoder.c) via a
+//  queue ! appsink branch off its enc-tee — it does NOT encode itself, so the
+//  ride and event recorders share a single HW encode session:
+//
+//    enc-tee ! queue ! appsink
+//
 //  appsink's new-sample callback (streaming thread) appends each encoded access
 //  unit to a GOP ring. A 1s timer sends upstream force-key-unit events so the
 //  ring is always cuttable near any point. On an event we remember the trigger
@@ -12,11 +16,6 @@
 //  slice [keyframe<=event-PRE .. event+POST] and mux it to MP4 in a throwaway
 //  appsrc ! h264parse ! mp4mux ! filesink pipeline (no re-encode, no interaction
 //  with the live pipeline).
-//
-//  NOTE (concurrent HW encoders): this branch encodes continuously while armed.
-//  If the continuous ride recorder is also active, two H.264 encode sessions run
-//  at once — fine on capable SoCs, but some mobile encoders allow only one. If
-//  that bites on device, unify both onto a single shared encoder feeding two tees.
 //
 
 #include "gstreamer_event_recorder.h"
@@ -26,8 +25,6 @@
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
 
-#define EVR_PRE_NS   (5 * GST_SECOND)
-#define EVR_POST_NS  (7 * GST_SECOND)
 #define EVR_FKU_MS   1000            // force a keyframe every second
 
 typedef struct {
@@ -37,12 +34,14 @@ typedef struct {
     GstElement  *appsink;      // borrowed (owned by bin)
     guint        fku_timer_id; // periodic force-key-unit
 
+    guint        video_pre_length;  // seconds of footage to keep before the trigger
+    guint        video_post_length; // seconds of footage to keep after the trigger
+
     GMutex       lock;         // guards ring + the pending-save fields below
     GQueue      *ring;         // GstSample* (H.264 AUs), oldest first
 
     gboolean     pending;      // a save is waiting for POST seconds to buffer
     GstClockTime event_pts;    // trigger time
-    GstClockTime save_until;   // event_pts + POST
     gchar       *pending_path; // owned
 } RctGstEventRecorder;
 
@@ -75,7 +74,7 @@ static GstClockTime sample_pts(GstSample *s)
 // is pending so the slice can't be trimmed out from under us.
 static void evr_trim_locked(void)
 {
-    const GstClockTime max_span = EVR_PRE_NS + EVR_POST_NS + GST_SECOND;
+    const GstClockTime max_span = eventRecorder.video_pre_length * GST_SECOND + eventRecorder.video_post_length * GST_SECOND + GST_SECOND;
     for (;;) {
         GstSample *oldest = g_queue_peek_head(eventRecorder.ring);
         GstSample *newest = g_queue_peek_tail(eventRecorder.ring);
@@ -99,11 +98,11 @@ static void evr_trim_locked(void)
     }
 }
 
-// Collect refs of [latest keyframe <= event_pts-PRE .. save_until] into a GList.
+// Collect refs of [latest keyframe <= event_pts-PRE .. event_pts+POST] into a GList.
 // Caller holds the lock.
 static GList *evr_extract_slice_locked(void)
 {
-    GstClockTime want_from = (eventRecorder.event_pts > EVR_PRE_NS) ? eventRecorder.event_pts - EVR_PRE_NS : 0;
+    GstClockTime want_from = (eventRecorder.event_pts > eventRecorder.video_pre_length * GST_SECOND) ? eventRecorder.event_pts - eventRecorder.video_pre_length * GST_SECOND : 0;
 
     // Find the start: last keyframe with pts <= want_from (fall back to first keyframe).
     GList *start = NULL;
@@ -130,7 +129,8 @@ static GList *evr_extract_slice_locked(void)
     for (GList *l = start; l != NULL; l = l->next) {
         GstSample *s = (GstSample *)l->data;
         GstClockTime pts = sample_pts(s);
-        if (GST_CLOCK_TIME_IS_VALID(pts) && pts > eventRecorder.save_until)
+        GstClockTime save_until = eventRecorder.event_pts + (GstClockTime)eventRecorder.video_post_length * GST_SECOND;
+        if (GST_CLOCK_TIME_IS_VALID(pts) && pts > save_until)
             break;
         slice = g_list_prepend(slice, gst_sample_ref(s));
     }
@@ -261,7 +261,9 @@ static GstFlowReturn evr_on_new_sample(GstElement *appsink, gpointer user_data)
 
     if (eventRecorder.pending) {
         GstClockTime pts = sample_pts(sample);
-        if (GST_CLOCK_TIME_IS_VALID(pts) && pts >= eventRecorder.save_until) {
+        GstClockTime save_until =
+            eventRecorder.event_pts + (GstClockTime)eventRecorder.video_post_length * GST_SECOND;
+        if (GST_CLOCK_TIME_IS_VALID(pts) && pts >= save_until) {
             slice = evr_extract_slice_locked();
             path = eventRecorder.pending_path;
             eventRecorder.pending_path = NULL;
@@ -298,7 +300,7 @@ static gboolean evr_force_keyframe(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
-void rct_gst_event_recorder_set_buffering(gboolean enable)
+void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length, gint video_post_length)
 {
     evr_ensure_init();
 
@@ -313,6 +315,10 @@ void rct_gst_event_recorder_set_buffering(gboolean enable)
         return;
     }
 
+    // Clip window (seconds) — used by the ring trim, slice extraction and save.
+    eventRecorder.video_pre_length  = (video_pre_length  > 0) ? (guint)video_pre_length  : 0;
+    eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
+
     GstElement *enc_tee = rct_gst_encoder_acquire();
     if (!enc_tee) {
         g_printerr("event_recorder: shared encoder unavailable (pipeline not ready)\n");
@@ -323,7 +329,8 @@ void rct_gst_event_recorder_set_buffering(gboolean enable)
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=%" G_GUINT64_FORMAT " leaky=downstream ! "
         "appsink name=evrsink emit-signals=true sync=false max-buffers=2 drop=false",
-        (guint64)(EVR_PRE_NS + EVR_POST_NS + GST_SECOND));
+        (guint64)(eventRecorder.video_pre_length * GST_SECOND
+                  + eventRecorder.video_post_length * GST_SECOND + GST_SECOND));
 
     GError *error = NULL;
     eventRecorder.bin = gst_parse_bin_from_description(desc, TRUE, &error);
@@ -381,7 +388,6 @@ void rct_gst_event_recorder_save(const gchar *file_path)
         return;
     }
     eventRecorder.event_pts = now;
-    eventRecorder.save_until = now + EVR_POST_NS;
     eventRecorder.pending_path = g_strdup(file_path);
     eventRecorder.pending = TRUE;
     g_mutex_unlock(&eventRecorder.lock);
@@ -413,15 +419,15 @@ void rct_gst_event_recorder_reset(void)
         }
         eventRecorder.bin = NULL;
     }
-    if (eventRecorder.enc_tee) {
-        if (eventRecorder.tee_pad)
+    if (eventRecorder.tee_pad) {
+        if (eventRecorder.enc_tee)
             gst_element_release_request_pad(eventRecorder.enc_tee, eventRecorder.tee_pad);
+        gst_object_unref(eventRecorder.tee_pad);
         eventRecorder.tee_pad = NULL;
-
-        eventRecorder.enc_tee = NULL;
-        gst_object_unref(eventRecorder.enc_tee);
+    }
+    if (eventRecorder.enc_tee) {
+        eventRecorder.enc_tee = NULL;   // borrowed from the shared encoder; don't unref
         rct_gst_encoder_release();
-        
     }
     eventRecorder.appsink = NULL;
 

@@ -2,10 +2,10 @@
 //  gstreamer_event_recorder.h
 //
 //  "Instant replay" recorder: continuously buffers the last PRE seconds of
-//  hardware-encoded H.264 off the pipeline's video-tee, so that when an event
-//  fires it can save a clip covering [event - PRE, event + POST] — the seconds
-//  BEFORE the trigger plus the seconds after. The buffer holds encoded access
-//  units (whole GOPs) in memory, so no re-encode happens on save.
+//  H.264 tapped from the shared encoder, so that when an event
+//  fires it can save a clip covering [event - PRE, event + POST] — the
+//  seconds BEFORE the trigger plus the seconds after. The buffer holds encoded
+//  access units (whole GOPs) in memory, so no re-encode happens on save.
 //
 
 #ifndef gstreamer_event_recorder_h
@@ -13,10 +13,10 @@
 
 #include <gst/gst.h>
 
-// Arm/disarm continuous buffering. While armed, an encode+appsink branch runs
-// off video-tee, keeping the rolling GOP ring. Safe to call before the tee is
-// ready — it attaches once the pipeline is playing.
-void rct_gst_event_recorder_set_buffering(gboolean enable);
+// Arm/disarm continuous buffering. While armed, an appsink branch taps the
+// shared encoder's enc-tee, keeping the rolling GOP ring. video_pre_length /
+// video_post_length are the clip window in seconds.
+void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length, gint video_post_length);
 
 // Trigger: save a clip [event - PRE, event + POST] to file_path. Returns
 // immediately; the file is written once POST seconds of footage have buffered,
