@@ -41,6 +41,7 @@ RCT_EXPORT_VIEW_PROPERTY(onUriChanged, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onEOS, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onElementError, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onRecordingFinished, RCTBubblingEventBlock)
+RCT_EXPORT_VIEW_PROPERTY(onEventSaved, RCTBubblingEventBlock)
 
 // Methods
 RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber *)state) {
@@ -64,6 +65,12 @@ RCT_EXPORT_METHOD(startRecording:(nonnull NSNumber *)reactTag
 
 RCT_EXPORT_METHOD(stopRecording:(nonnull NSNumber *)reactTag) {
     rct_gst_stop_recording();
+}
+
+RCT_EXPORT_METHOD(saveEvent:(nonnull NSNumber *)reactTag
+                  path:(nonnull NSString *)path) {
+    NSLog(@"RCTGstPlayer : saveEvent tag=%@ path=%@", reactTag, path);
+    rct_gst_event_recorder_save((const gchar *)[path UTF8String]);
 }
 
 // react-native init

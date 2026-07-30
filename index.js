@@ -112,6 +112,11 @@ export default class GstPlayer extends React.Component {
             this.props.onRecordingFinished()
     }
 
+    onEventSaved(_event) {
+        if (this.props.onEventSaved)
+            this.props.onEventSaved(_event.nativeEvent.path)
+    }
+
     shouldComponentUpdate() {
         return true
     }
@@ -162,6 +167,14 @@ export default class GstPlayer extends React.Component {
         )
     }
 
+    saveEvent(path) {
+        UIManager.dispatchViewManagerCommand(
+            this.playerHandle,
+            UIManager.RCTGstPlayer.Commands.saveEvent,
+            [path]
+        )
+    }
+
     // Helper methods
     recreateView() {
         UIManager.dispatchViewManagerCommand(
@@ -186,6 +199,7 @@ export default class GstPlayer extends React.Component {
                 onEOS={this.onEOS.bind(this)}
                 onElementError={this.onElementError.bind(this)}
                 onRecordingFinished={this.onRecordingFinished.bind(this)}
+                onEventSaved={this.onEventSaved.bind(this)}
 
                 ref={(playerView) => this.playerViewRef = playerView}
 
@@ -211,6 +225,7 @@ GstPlayer.propTypes = {
     onEOS: PropTypes.func,
     onElementError: PropTypes.func,
     onRecordingFinished: PropTypes.func,
+    onEventSaved: PropTypes.func,
 
     // Methods
     setGstState: PropTypes.func,
@@ -220,6 +235,7 @@ GstPlayer.propTypes = {
     stopImageCapture: PropTypes.func,
     startRecording: PropTypes.func,
     stopRecording: PropTypes.func,
+    saveEvent: PropTypes.func,
 
     // Helper methods
     createDrawableSurface: PropTypes.func,

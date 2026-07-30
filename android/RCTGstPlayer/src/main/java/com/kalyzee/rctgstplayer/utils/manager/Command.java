@@ -10,7 +10,7 @@ import java.util.Map;
 public enum Command {
 
     // callable methods from JS
-    setState, recreateView, startRecording, stopRecording;
+    setState, recreateView, startRecording, stopRecording, saveEvent;
 
     // Index for js association
     private int index;

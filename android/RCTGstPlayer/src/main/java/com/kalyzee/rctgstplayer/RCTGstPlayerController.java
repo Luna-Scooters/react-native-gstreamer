@@ -58,6 +58,8 @@ public class RCTGstPlayerController
   private native void nativeRCTGstStartRecording(String path);
   private native void nativeRCTGstStopRecording();
 
+  private native void nativeRCTGstSaveEvent(String path);
+
   private native void nativeRCTGstSetPipelineState(int state);
 
   private native void nativeRCTGstInitAndRun(RCTGstConfiguration configuration);
@@ -116,6 +118,12 @@ public class RCTGstPlayerController
 
   public void onRecordingFinished() {
     emitEvent("onRecordingFinished", null);
+  }
+
+  public void onEventSaved(String path) {
+    WritableMap event = Arguments.createMap();
+    event.putString("path", path);
+    emitEvent("onEventSaved", event);
   }
 
   private void emitEvent(String eventName, @Nullable WritableMap eventData) {
@@ -275,6 +283,8 @@ public class RCTGstPlayerController
   }
 
   void stopRecording() { nativeRCTGstStopRecording(); }
+
+  void saveEvent(String path) { nativeRCTGstSaveEvent(path); }
 
   // External C Libraries
   static {

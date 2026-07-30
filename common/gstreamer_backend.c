@@ -56,6 +56,7 @@ RctGstConfiguration *rct_gst_get_configuration()
         configuration->onInit = NULL;
         configuration->onEOS = NULL;
         configuration->onRecordingFinished = NULL;
+        configuration->onEventSaved = NULL;
         configuration->initialDrawableSurface = 0;
     }
     return configuration;
