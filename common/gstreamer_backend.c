@@ -496,6 +496,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command_app;
 
     rct_gst_recorder_reset();
+    rct_gst_event_recorder_reset();
     if (pipeline) {
         gst_element_set_state(pipeline, GST_STATE_NULL);
         if (bus_watch_id) {
@@ -606,7 +607,7 @@ void rct_gst_terminate()
         drawable_surface = 0;
 
     rct_gst_recorder_reset();
-    
+    rct_gst_event_recorder_reset();
     rct_gst_set_pipeline_state(GST_STATE_NULL);
     gst_object_unref(pipeline);
     
