@@ -44,6 +44,7 @@ GSTREAMER_PLUGINS         := $(GSTREAMER_PLUGINS_CORE)      \
                              $(GSTREAMER_PLUGINS_NET)       \
                              $(GSTREAMER_PLUGINS_SYS)       \
                              $(GSTREAMER_PLUGINS_CODECS_RESTRICTED) \
+                             $(GSTREAMER_PLUGINS_CODECS_GPL_RESTRICTED) \
                              $(GSTREAMER_CODECS_GPL)        \
                              $(GSTREAMER_PLUGINS_ENCODING)  \
                              $(GSTREAMER_PLUGINS_VIS)       \
