@@ -49,6 +49,11 @@ public class RCTGstPlayer extends SimpleViewManager {
         this.playerController.setRctGstDebugging(isDebugging);
     }
 
+    @ReactProp(name = "captureFrames", defaultBoolean = false)
+    public void setCaptureFrames(View controllerView, boolean captureFrames) {
+        this.playerController.setCaptureFrames(captureFrames);
+    }
+
     // Methods
     @Override
     public void receiveCommand(View view, int commandType, @Nullable ReadableArray args) {
