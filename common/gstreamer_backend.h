@@ -60,6 +60,8 @@ void apply_uri();
 
 GstSample *rct_gst_pull_last_sample(void);
 
+gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps);
+
 #include "gstreamer_recorder.h"
 
 #endif /* gstreamer_backend_h */

@@ -10,6 +10,14 @@
 extern GstElement *pipeline;
 extern GstElement *video_tee;
 
+static const gint FALLBACK_WIDTH = 360;
+static const gint FALLBACK_HEIGHT = 360;
+static const gint FALLBACK_FPS = 10;
+static const gdouble BITS_PER_PIXEL = 0.1;
+static const gint KEYFRAME_INTERVAL_SEC = 3;
+static const GstClockTime RECORD_BIN_STATE_TIMEOUT = 100 * GST_MSECOND;
+
+
 typedef struct {
     GstElement  *bin;            // queue ! ... ! filesink, NULL when idle
     GstPad      *tee_pad;        // requested tee src pad feeding the bin
@@ -130,7 +138,7 @@ static GstPadProbeReturn record_unlink_probe(GstPad *tee_pad, GstPadProbeInfo *i
     return GST_PAD_PROBE_REMOVE;
 }
 
-void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gint fps)
+void rct_gst_start_recording(const gchar *file_path)
 {
     if (file_path == NULL || *file_path == '\0') {
         g_printerr("start_recording: no output path provided\n");
@@ -145,23 +153,29 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
         return;
     }
 
+    gint width = FALLBACK_WIDTH;
+    gint height = FALLBACK_HEIGHT;
+    gint fps = FALLBACK_FPS;
+    if (rct_gst_get_video_info(&width, &height, &fps))
+        g_print("Recording using camera stream info: %dx%d @ %dfps\n",
+                width, height, fps);
+
     gchar *enc = rct_gst_find_h264_encoder();
     g_print("Recording with encoder: %s\n", enc);
 
     // Don't pin the raw format: let videoconvert negotiate whatever the chosen
     // encoder accepts (amcvidenc prefers NV12, x264enc prefers I420, etc.).
     GString *caps = g_string_new("video/x-raw");
-    if (width > 0)  g_string_append_printf(caps, ",width=%d", width);
-    if (height > 0) g_string_append_printf(caps, ",height=%d", height);
-    if (fps > 0)    g_string_append_printf(caps, ",framerate=%d/1", fps);
+    g_string_append_printf(caps, ",framerate=%d/1", fps);
 
     // Fragmented MP4 (1s fragments): media hits the disk continuously, so a crash,
     // kill or forced teardown mid-ride still leaves a playable file. faststart
     // would buffer everything and only write at EOS — any interruption = 0 bytes.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
-        "videorate ! videoscale ! videoconvert ! %s ! "
-        "%s ! h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
+        "videorate ! videoconvert ! %s ! "
+        "%s name=venc ! "
+        "h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
         "filesink name=recsink async=false location=\"%s\"",
         caps->str, enc, file_path);
 
@@ -177,6 +191,16 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
         return;
     }
 
+    // Shrink the file: 3s keyframe interval (fewer I-frames) + a capped bitrate.
+    GstElement *venc = gst_bin_get_by_name(GST_BIN(recorder.bin), "venc");
+    if (venc) {
+        gdouble bits = (gdouble)width * height * fps * BITS_PER_PIXEL;
+        gint bitrate_kbps = (gint)(bits / 1000.0);
+        bitrate_kbps = CLAMP(bitrate_kbps, 500, 4000);
+        rct_gst_configure_h264_encoder(venc, fps, KEYFRAME_INTERVAL_SEC, bitrate_kbps);
+        gst_object_unref(venc);
+    }
+
     GstElement *recsink = gst_bin_get_by_name(GST_BIN(recorder.bin), "recsink");
     if (recsink) {
         GstPad *sinkpad = gst_element_get_static_pad(recsink, "sink");
@@ -189,6 +213,18 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
     // Attach the branch to the tee, live. The stamp probe (rebase/PTS repair)
     // rides on the requested pad and dies with it.
     gst_bin_add(GST_BIN(pipeline), recorder.bin);
+    gst_element_sync_state_with_parent(recorder.bin);
+    GstStateChangeReturn state_ret =
+        gst_element_get_state(recorder.bin, NULL, NULL, RECORD_BIN_STATE_TIMEOUT);
+    if (state_ret == GST_STATE_CHANGE_FAILURE) {
+        g_printerr("start_recording: record bin failed to start, aborting\n");
+        rct_gst_recorder_reset();
+        return;
+    }
+    else if (state_ret == GST_STATE_CHANGE_ASYNC) {
+        g_printerr("start_recording: record bin still changing state after %dms, "
+                   "linking anyway\n", (gint)(RECORD_BIN_STATE_TIMEOUT / GST_MSECOND));
+    }
     recorder.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
     gst_pad_add_probe(recorder.tee_pad, GST_PAD_PROBE_TYPE_BUFFER,
                       record_stamp_probe, NULL, NULL);
@@ -200,7 +236,6 @@ void rct_gst_start_recording(const gchar *file_path, gint width, gint height, gi
         return;
     }
     gst_object_unref(bin_sink);
-    gst_element_sync_state_with_parent(recorder.bin);
 
     g_print("Recording started -> %s\n", file_path);
 }
