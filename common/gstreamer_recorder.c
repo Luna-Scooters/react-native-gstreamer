@@ -46,7 +46,6 @@ void rct_gst_recorder_reset(void)
             recorder.tee_pad = NULL;
         }
 
-        gst_object_unref(recorder.enc_tee);
         recorder.enc_tee = NULL;
         rct_gst_encoder_release();
     }

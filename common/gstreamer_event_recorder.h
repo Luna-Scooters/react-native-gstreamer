@@ -1,11 +1,15 @@
 //
 //  gstreamer_event_recorder.h
 //
-//  "Instant replay" recorder: continuously buffers the last PRE seconds of
-//  H.264 tapped from the shared encoder, so that when an event
-//  fires it can save a clip covering [event - PRE, event + POST] — the
-//  seconds BEFORE the trigger plus the seconds after. The buffer holds encoded
-//  access units (whole GOPs) in memory, so no re-encode happens on save.
+//  "Instant replay" recorder built on a HELD BACKLOG QUEUE — the canonical
+//  GStreamer backlog-recording pattern (see Centricular's
+//  test-backlog-recording-h264.c).
+//
+//  While armed, a leaky queue tapped off the shared encoder's enc-tee keeps the
+//  last PRE seconds of encoded H.264, held back by a BLOCKING pad probe so it
+//  accumulates but records nothing. On an event, it is unblocked: the backlog
+//  flushes into a new mp4mux, another POST seconds are recorded, then re-block and 
+//  push EOS to finalize the file.
 //
 
 #ifndef gstreamer_event_recorder_h
@@ -13,14 +17,15 @@
 
 #include <gst/gst.h>
 
-// Arm/disarm continuous buffering. While armed, an appsink branch taps the
-// shared encoder's enc-tee, keeping the rolling GOP ring. video_pre_length /
-// video_post_length are the clip window in seconds.
+// Arm/disarm buffering. While armed, a leaky backlog queue off the shared
+// encoder's enc-tee holds the last video_pre_length seconds of H.264 (held shut
+// by a block probe). video_post_length is the tail recorded after a trigger.
+// Both in seconds.
 void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length, gint video_post_length);
 
 // Trigger: save a clip [event - PRE, event + POST] to file_path. Returns
-// immediately; the file is written once POST seconds of footage have buffered,
-// then onEventSaved(path) fires. No-op if not buffering or a save is pending.
+// immediately; the backlog flushes now and POST seconds of live footage follow,
+// then onEventSaved(path) fires. No-op if not buffering or a clip is recording.
 void rct_gst_event_recorder_save(const gchar *file_path);
 
 gboolean rct_gst_event_recorder_is_buffering(void);

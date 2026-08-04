@@ -3,295 +3,186 @@
 //
 //  See gstreamer_event_recorder.h.
 //
-//  Data flow: taps the shared H.264 encoder (gstreamer_encoder.c) via a
-//  queue ! appsink branch off its enc-tee — it does NOT encode itself, so the
-//  ride and event recorders share a single HW encode session:
+//  Backlog recording, the canonical GStreamer way. Off the shared encoder's
+//  enc-tee we keep a leaky queue whose SRC pad is held by a blocking probe:
 //
-//    enc-tee ! queue ! appsink
+//    enc-tee ! queue name=evq (leaky, holds ~PRE s)   [src pad BLOCKED]
 //
-//  appsink's new-sample callback (streaming thread) appends each encoded access
-//  unit to a GOP ring. A 1s timer sends upstream force-key-unit events so the
-//  ring is always cuttable near any point. On an event we remember the trigger
-//  PTS; once the ring has buffered up to event+POST we extract the contiguous
-//  slice [keyframe<=event-PRE .. event+POST] and mux it to MP4 in a throwaway
-//  appsrc ! h264parse ! mp4mux ! filesink pipeline (no re-encode, no interaction
-//  with the live pipeline).
+//  Blocked, the queue can't push, so it just fills and leaks — always holding the
+//  most recent PRE seconds of encoded H.264. On a trigger we:
+//    1. build a fresh  mp4mux ! filesink  and link it after the queue,
+//    2. drop the one buffer parked in the block probe, then drop delta frames
+//       until the first keyframe (so the MP4 opens on an IDR),
+//    3. remove the block probe: the backlog flushes into the muxer, then live
+//       frames follow for POST seconds,
+//    4. re-block the queue and push EOS into the muxer to finalize the file.
 //
 
 #include "gstreamer_event_recorder.h"
 #include "gstreamer_backend.h"
 #include "gstreamer_encoder.h"
+#include <gst/video/video.h>
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
 
 #define EVR_FKU_MS   1000            // force a keyframe every second
+#define EVR_BACKLOG_SLACK_SEC 1                    // keep a bit more than PRE so the
+                                                   // keyframe drop still leaves ~PRE s
+static const GstClockTime EVR_STATE_TIMEOUT    = 200 * GST_MSECOND;
+static const GstClockTime EVR_FINALIZE_TIMEOUT = 3 * GST_SECOND;
 
 typedef struct {
-    GstElement  *bin;          // encode + appsink branch, NULL when disarmed
-    GstElement  *enc_tee;      // shared encoder's tee we requested a pad from (borrowed)
-    GstPad      *tee_pad;      // requested enc-tee src pad feeding the bin
-    GstElement  *appsink;      // borrowed (owned by bin)
-    guint        fku_timer_id; // periodic force-key-unit
+    GstElement  *enc_tee;           // shared encoder's tee we requested a pad from (borrowed)
+    GstElement  *event_queue;       // persistent leaky backlog queue, NULL when disarmed
+    GstPad      *enc_tee_pad;       // requested enc-tee src pad feeding evq
+    GstPad      *event_queue_src;   // evq src pad — where we block / gate / push EOS
+    gulong       block_id;          // block probe holding the backlog (armed-idle)
+    gulong       gate_id;           // keyframe-gate probe active during a clip's start
+    guint        fku_timer_id;      // periodic force-key-unit while armed
+    guint        video_pre_length;  // seconds kept before the trigger
+    guint        video_post_length; // seconds recorded after the trigger
 
-    guint        video_pre_length;  // seconds of footage to keep before the trigger
-    guint        video_post_length; // seconds of footage to keep after the trigger
-
-    GMutex       lock;         // guards ring + the pending-save fields below
-    GQueue      *ring;         // GstSample* (H.264 AUs), oldest first
-
-    gboolean     pending;      // a save is waiting for POST seconds to buffer
-    GstClockTime event_pts;    // trigger time
-    gchar       *pending_path; // owned
+    // Per-clip (one event capture at a time):
+    GstElement  *record_bin;    // fresh mp4mux ! filesink, NULL when idle
+    guint        buffer_count;  // drives the drop-one + keyframe gate
+    guint        stop_id;       // POST timer that ends the clip
+    guint        watchdog_id;   // forces teardown if EOS never reaches the filesink
+    gchar       *pending_path;  // owned, the current clip's output path
 } RctGstEventRecorder;
 
 static RctGstEventRecorder eventRecorder;
-static gboolean er_inited = FALSE;
 
-static void evr_ensure_init(void)
+/* ---- probes ---- */
+
+// Holds the queue's src pad closed, so the queue fills but nothing flows
+static GstPadProbeReturn evr_block_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    if (!er_inited) {
-        g_mutex_init(&eventRecorder.lock);
-        eventRecorder.ring = g_queue_new();
-        er_inited = TRUE;
+    (void)pad; (void)info; (void)user_data;
+    return GST_PAD_PROBE_OK;
+}
+
+// Runs when the backlog is unblocked. Drops delta frames until the first keyframe 
+// so the MP4 opens on an IDR. 
+static GstPadProbeReturn evr_gate_probe_keyframe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    (void)pad; (void)user_data;
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (buf == NULL)
+        return GST_PAD_PROBE_OK;
+
+    if (eventRecorder.buffer_count++ == 0)
+        return GST_PAD_PROBE_DROP;   // the stale buffer parked in the block probe
+
+    if (!GST_BUFFER_FLAG_IS_SET(buf, GST_BUFFER_FLAG_DELTA_UNIT)) {
+        eventRecorder.gate_id = 0;              // keyframe: let it through and remove the gate
+        return GST_PAD_PROBE_REMOVE;
     }
+    return GST_PAD_PROBE_DROP;        // delta frame: keep waiting for a keyframe
 }
 
-static gboolean sample_is_keyframe(GstSample *s)
+static gboolean evr_finalize(gpointer forced_by_watchdog);
+
+// Fires when EOS reaches the filesink: the file is finalized — schedule teardown.
+static GstPadProbeReturn evr_eos_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    GstBuffer *b = gst_sample_get_buffer(s);
-    return b && !GST_BUFFER_FLAG_IS_SET(b, GST_BUFFER_FLAG_DELTA_UNIT);
+    (void)pad; (void)user_data;
+    if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) != GST_EVENT_EOS)
+        return GST_PAD_PROBE_OK;
+    g_idle_add(evr_finalize, NULL);
+    return GST_PAD_PROBE_REMOVE;
 }
 
-static GstClockTime sample_pts(GstSample *s)
-{
-    GstBuffer *b = gst_sample_get_buffer(s);
-    return b ? GST_BUFFER_PTS(b) : GST_CLOCK_TIME_NONE;
-}
+/* ---- clip lifecycle ---- */
 
-// Drop whole leading GOPs while the ring spans more than we could ever need
-// (PRE + POST + one GOP of slack). Caller holds the lock. Skipped while a save
-// is pending so the slice can't be trimmed out from under us.
-static void evr_trim_locked(void)
+// Tear the current clip's mux+filesink down (leaves the armed backlog intact).
+static void evr_drop_record_bin(void)
 {
-    const GstClockTime max_span = eventRecorder.video_pre_length * GST_SECOND + eventRecorder.video_post_length * GST_SECOND + GST_SECOND;
-    for (;;) {
-        GstSample *oldest = g_queue_peek_head(eventRecorder.ring);
-        GstSample *newest = g_queue_peek_tail(eventRecorder.ring);
-        if (!oldest || !newest || oldest == newest)
-            return;
-        GstClockTime o = sample_pts(oldest), n = sample_pts(newest);
-        if (!GST_CLOCK_TIME_IS_VALID(o) || !GST_CLOCK_TIME_IS_VALID(n) || n < o)
-            return;
-        if (n - o <= max_span)
-            return;
-        // Only drop a keyframe (GOP boundary) so the ring always starts decodable.
-        // Peek the second element: if it's a keyframe, we can drop the head.
-        GstSample *head = g_queue_pop_head(eventRecorder.ring);
-        GstSample *next = g_queue_peek_head(eventRecorder.ring);
-        if (next && !sample_is_keyframe(next)) {
-            // Not at a GOP boundary yet — push head back and stop (rare).
-            g_queue_push_head(eventRecorder.ring, head);
-            return;
-        }
-        gst_sample_unref(head);
-    }
-}
-
-// Collect refs of [latest keyframe <= event_pts-PRE .. event_pts+POST] into a GList.
-// Caller holds the lock.
-static GList *evr_extract_slice_locked(void)
-{
-    GstClockTime want_from = (eventRecorder.event_pts > eventRecorder.video_pre_length * GST_SECOND) ? eventRecorder.event_pts - eventRecorder.video_pre_length * GST_SECOND : 0;
-
-    // Find the start: last keyframe with pts <= want_from (fall back to first keyframe).
-    GList *start = NULL;
-    for (GList *l = eventRecorder.ring->head; l != NULL; l = l->next) {
-        GstSample *s = (GstSample *)l->data;
-        GstClockTime pts = sample_pts(s);
-        if (!GST_CLOCK_TIME_IS_VALID(pts))
-            continue;
-        if (sample_is_keyframe(s) && pts <= want_from)
-            start = l;                 // keep advancing to the latest such keyframe
-        if (pts > want_from && start)
-            break;
-    }
-    if (!start) {
-        // No keyframe before the window; start at the first keyframe we have.
-        for (GList *l = eventRecorder.ring->head; l != NULL; l = l->next) {
-            if (sample_is_keyframe((GstSample *)l->data)) { start = l; break; }
+    if (eventRecorder.event_queue_src) {
+        GstPad *peer = gst_pad_get_peer(eventRecorder.event_queue_src);
+        if (peer) {
+            gst_pad_unlink(eventRecorder.event_queue_src, peer);
+            gst_object_unref(peer);
         }
     }
-    if (!start)
-        return NULL;
-
-    GList *slice = NULL;
-    for (GList *l = start; l != NULL; l = l->next) {
-        GstSample *s = (GstSample *)l->data;
-        GstClockTime pts = sample_pts(s);
-        GstClockTime save_until = eventRecorder.event_pts + (GstClockTime)eventRecorder.video_post_length * GST_SECOND;
-        if (GST_CLOCK_TIME_IS_VALID(pts) && pts > save_until)
-            break;
-        slice = g_list_prepend(slice, gst_sample_ref(s));
+    if (eventRecorder.record_bin) {
+        gst_element_set_state(eventRecorder.record_bin, GST_STATE_NULL);
+        if (pipeline)
+            gst_bin_remove(GST_BIN(pipeline), eventRecorder.record_bin);
+        eventRecorder.record_bin = NULL;
     }
-    return g_list_reverse(slice);
 }
 
-/* ---- Muxing the extracted slice (runs on the main loop) ---- */
-
-typedef struct {
-    GList  *slice;   // GstSample* refs, in order (first is a keyframe)
-    gchar  *path;    // owned
-    GstElement *mux_pipeline;
-} EvrMuxJob;
-
-static void evr_mux_job_free(EvrMuxJob *job)
+// Main loop, once the clip's file is finalized (EOS) or the watchdog fires.
+static gboolean evr_finalize(gpointer forced_by_watchdog)
 {
-    if (job->mux_pipeline) {
-        gst_element_set_state(job->mux_pipeline, GST_STATE_NULL);
-        gst_object_unref(job->mux_pipeline);
+    if (!eventRecorder.record_bin)
+        return G_SOURCE_REMOVE;   // already finalized
+    if (forced_by_watchdog)
+        g_printerr("Event clip finalize timed out, forcing teardown (file may be truncated)\n");
+    if (eventRecorder.watchdog_id) {
+        g_source_remove(eventRecorder.watchdog_id);
+        eventRecorder.watchdog_id = 0;
     }
-    g_list_free_full(job->slice, (GDestroyNotify)gst_sample_unref);
-    g_free(job->path);
-    g_free(job);
+
+    evr_drop_record_bin();
+
+    gchar *path = eventRecorder.pending_path;
+    eventRecorder.pending_path = NULL;
+    if (path) {
+        g_print("Event clip saved -> %s\n", path);
+        RctGstConfiguration *cfg = rct_gst_get_configuration();
+        if (cfg->onEventSaved)
+            cfg->onEventSaved(path);
+        g_free(path);
+    }
+    return G_SOURCE_REMOVE;
 }
 
-static gboolean evr_mux_bus_cb(GstBus *bus, GstMessage *msg, gpointer user_data)
+// Pushes EOS into the muxer to finalize the file. Done on its own thread because
+// gst_pad_send_event(EOS) travels synchronously through mux + filesink.
+static gpointer evr_push_eos(gpointer data)
 {
-    EvrMuxJob *job = (EvrMuxJob *)user_data;
-    switch (GST_MESSAGE_TYPE(msg)) {
-        case GST_MESSAGE_EOS: {
-            g_print("Event clip saved -> %s\n", job->path);
-            RctGstConfiguration *cfg = rct_gst_get_configuration();
-            if (cfg->onEventSaved)
-                cfg->onEventSaved(job->path);
-            evr_mux_job_free(job);
-            return FALSE;  // remove the watch
-        }
-        case GST_MESSAGE_ERROR: {
-            GError *err = NULL; gchar *dbg = NULL;
-            gst_message_parse_error(msg, &err, &dbg);
-            g_printerr("Event clip mux error: %s (%s)\n",
-                       err ? err->message : "?", dbg ? dbg : "");
-            g_clear_error(&err); g_free(dbg);
-            evr_mux_job_free(job);
-            return FALSE;
-        }
-        default:
-            return TRUE;
-    }
+    GstPad *mux_sink = data;   // reffed by the caller
+    gst_pad_send_event(mux_sink, gst_event_new_eos());
+    gst_object_unref(mux_sink);
+    return NULL;
 }
 
-// Builds the throwaway mux pipeline, pushes the slice + EOS. Main loop.
-static gboolean evr_run_mux_job(gpointer data)
-{
-    EvrMuxJob *job = (EvrMuxJob *)data;
-    if (!job->slice) { evr_mux_job_free(job); return G_SOURCE_REMOVE; }
-
-    GError *error = NULL;
-    gchar *desc = g_strdup_printf(
-        "appsrc name=esrc is-live=false format=time do-timestamp=false ! "
-        "h264parse config-interval=-1 ! mp4mux fragment-duration=1000 ! "
-        "filesink name=esink async=false");
-    job->mux_pipeline = gst_parse_launch(desc, &error);
-    g_free(desc);
-    if (!job->mux_pipeline) {
-        g_printerr("Event clip: mux pipeline build failed: %s\n",
-                   error ? error->message : "?");
-        if (error) g_error_free(error);
-        evr_mux_job_free(job);
-        return G_SOURCE_REMOVE;
-    }
-
-    GstElement *esink = gst_bin_get_by_name(GST_BIN(job->mux_pipeline), "esink");
-    g_object_set(esink, "location", job->path, NULL);
-    gst_object_unref(esink);
-
-    GstElement *esrc = gst_bin_get_by_name(GST_BIN(job->mux_pipeline), "esrc");
-    // Match the caps the encoder produced so h264parse/mp4mux negotiate.
-    GstSample *first = (GstSample *)job->slice->data;
-    GstCaps *caps = gst_sample_get_caps(first);
-    if (caps)
-        g_object_set(esrc, "caps", caps, NULL);
-
-    GstBus *bus = gst_element_get_bus(job->mux_pipeline);
-    gst_bus_add_watch(bus, evr_mux_bus_cb, job);
-    gst_object_unref(bus);
-
-    gst_element_set_state(job->mux_pipeline, GST_STATE_PLAYING);
-
-    // Rebase timestamps to 0 and push every buffer, then EOS.
-    GstClockTime base = sample_pts(first);
-    if (!GST_CLOCK_TIME_IS_VALID(base)) base = 0;
-    for (GList *l = job->slice; l != NULL; l = l->next) {
-        GstBuffer *src = gst_sample_get_buffer((GstSample *)l->data);
-        GstBuffer *buf = gst_buffer_copy(src);
-        GstClockTime pts = GST_BUFFER_PTS(buf);
-        GST_BUFFER_PTS(buf) = (GST_CLOCK_TIME_IS_VALID(pts) && pts > base) ? pts - base : 0;
-        GST_BUFFER_DTS(buf) = GST_CLOCK_TIME_NONE;
-        GstFlowReturn ret = GST_FLOW_OK;
-        g_signal_emit_by_name(esrc, "push-buffer", buf, &ret);
-        gst_buffer_unref(buf);
-        if (ret != GST_FLOW_OK) {
-            g_printerr("Event clip: push-buffer failed (%d)\n", ret);
-            break;
-        }
-    }
-    GstFlowReturn ret = GST_FLOW_OK;
-    g_signal_emit_by_name(esrc, "end-of-stream", &ret);
-    gst_object_unref(esrc);
-    return G_SOURCE_REMOVE;  // teardown happens in the bus watch (EOS/ERROR)
-}
-
-/* ---- Capture branch ---- */
-
-static GstFlowReturn evr_on_new_sample(GstElement *appsink, gpointer user_data)
+// POST elapsed: stop the clip. Re-block the backlog so no more frames enter the
+// muxer, then EOS the muxer to finalize. Main loop.
+static gboolean evr_stop(gpointer user_data)
 {
     (void)user_data;
-    GstSample *sample = NULL;
-    g_signal_emit_by_name(appsink, "pull-sample", &sample);
-    if (!sample)
-        return GST_FLOW_OK;
+    eventRecorder.stop_id = 0;
+    if (!eventRecorder.record_bin || !eventRecorder.event_queue_src)
+        return G_SOURCE_REMOVE;
 
-    GList *slice = NULL;
-    gchar *path = NULL;
-
-    g_mutex_lock(&eventRecorder.lock);
-    g_queue_push_tail(eventRecorder.ring, sample);  // ownership transferred from pull-sample
-
-    if (eventRecorder.pending) {
-        GstClockTime pts = sample_pts(sample);
-        GstClockTime save_until =
-            eventRecorder.event_pts + (GstClockTime)eventRecorder.video_post_length * GST_SECOND;
-        if (GST_CLOCK_TIME_IS_VALID(pts) && pts >= save_until) {
-            slice = evr_extract_slice_locked();
-            path = eventRecorder.pending_path;
-            eventRecorder.pending_path = NULL;
-            eventRecorder.pending = FALSE;
-        }
-        // While pending we accumulate (no trim) so the slice stays intact.
-    } else {
-        evr_trim_locked();
+    // Back to holding a rolling backlog.
+    eventRecorder.block_id = gst_pad_add_probe(eventRecorder.event_queue_src,
+        GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER, evr_block_probe, NULL, NULL);
+    if (eventRecorder.gate_id) {   // gate never saw a keyframe (shouldn't happen with the FKU)
+        gst_pad_remove_probe(eventRecorder.event_queue_src, eventRecorder.gate_id);
+        eventRecorder.gate_id = 0;
     }
-    g_mutex_unlock(&eventRecorder.lock);
 
-    if (slice) {
-        EvrMuxJob *job = g_new0(EvrMuxJob, 1);
-        job->slice = slice;
-        job->path = path;
-        g_idle_add(evr_run_mux_job, job);
-    }
-    return GST_FLOW_OK;
+    GstPad *mux_sink = gst_pad_get_peer(eventRecorder.event_queue_src);   // the record bin's sink
+    if (mux_sink)
+        g_thread_new("evr-eos", evr_push_eos, mux_sink);
+
+    eventRecorder.watchdog_id = g_timeout_add((guint)(EVR_FINALIZE_TIMEOUT / GST_MSECOND),
+                                   evr_finalize, GINT_TO_POINTER(TRUE));
+    return G_SOURCE_REMOVE;
 }
 
-// Periodically ask upstream (the encoder) for a keyframe — encoder-agnostic,
-// avoids per-encoder key-interval property names.
+// Periodically ask the shared encoder for a keyframe (upstream event on the tee's
+// sink pad) so clips can start close to event-PRE
 static gboolean evr_force_keyframe(gpointer user_data)
 {
     (void)user_data;
-    if (!eventRecorder.appsink)
+    if (!eventRecorder.enc_tee)
         return G_SOURCE_REMOVE;
-    GstPad *pad = gst_element_get_static_pad(eventRecorder.appsink, "sink");
+    GstPad *pad = gst_element_get_static_pad(eventRecorder.enc_tee, "sink");
     if (pad) {
         gst_pad_send_event(pad, gst_video_event_new_upstream_force_key_unit(
             GST_CLOCK_TIME_NONE, TRUE, 0));
@@ -300,142 +191,169 @@ static gboolean evr_force_keyframe(gpointer user_data)
     return G_SOURCE_CONTINUE;
 }
 
+/* ---- public API ---- */
+
 void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length, gint video_post_length)
 {
-    evr_ensure_init();
-
     if (!enable) {
         rct_gst_event_recorder_reset();
         return;
     }
-    if (eventRecorder.bin)
-        return;  // already buffering
+    if (eventRecorder.event_queue)
+        return;   // already armed
     if (!pipeline) {
         g_printerr("event_recorder: pipeline not ready\n");
         return;
     }
 
-    // Clip window (seconds) — used by the ring trim, slice extraction and save.
-    eventRecorder.video_pre_length  = (video_pre_length  > 0) ? (guint)video_pre_length  : 0;
-    eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
-
-    GstElement *enc_tee = rct_gst_encoder_acquire();
-    if (!enc_tee) {
+    eventRecorder.enc_tee = rct_gst_encoder_acquire();
+    if (!eventRecorder.enc_tee) {
         g_printerr("event_recorder: shared encoder unavailable (pipeline not ready)\n");
         return;
     }
-    eventRecorder.enc_tee = enc_tee;
+    eventRecorder.video_pre_length  = (video_pre_length  > 0) ? (guint)video_pre_length  : 0;
+    eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
 
-    gchar *desc = g_strdup_printf(
-        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=%" G_GUINT64_FORMAT " leaky=downstream ! "
-        "appsink name=evrsink emit-signals=true sync=false max-buffers=2 drop=false",
-        (guint64)(eventRecorder.video_pre_length * GST_SECOND
-                  + eventRecorder.video_post_length * GST_SECOND + GST_SECOND));
+    // Leaky backlog: always keeps the most recent PRE (+slack) seconds.
+    eventRecorder.event_queue = gst_element_factory_make("queue", "evq");
+    g_object_set(eventRecorder.event_queue,
+        "max-size-buffers", (guint)0,
+        "max-size-bytes",   (guint)0,
+        "max-size-time",    (guint64)(eventRecorder.video_pre_length + EVR_BACKLOG_SLACK_SEC) * GST_SECOND,
+        "leaky",            2,   // 2 = downstream: drop the OLDEST when full
+        NULL);
+    gst_bin_add(GST_BIN(pipeline), eventRecorder.event_queue);
 
-    GError *error = NULL;
-    eventRecorder.bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    g_free(desc);
-    if (!eventRecorder.bin) {
-        g_printerr("event_recorder: branch build failed: %s\n", error ? error->message : "?");
-        if (error) g_error_free(error);
-        return;
-    }
+    // Block the queue's output, then start it: it fills but records nothing.
+    eventRecorder.event_queue_src = gst_element_get_static_pad(eventRecorder.event_queue, "src");
+    eventRecorder.block_id = gst_pad_add_probe(eventRecorder.event_queue_src,
+        GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER, evr_block_probe, NULL, NULL);
+    gst_element_sync_state_with_parent(eventRecorder.event_queue);
+    gst_element_get_state(eventRecorder.event_queue, NULL, NULL, EVR_STATE_TIMEOUT);
 
-    eventRecorder.appsink = gst_bin_get_by_name(GST_BIN(eventRecorder.bin), "evrsink");
-    if (eventRecorder.appsink) {
-        g_signal_connect(eventRecorder.appsink, "new-sample", G_CALLBACK(evr_on_new_sample), NULL);
-        gst_object_unref(eventRecorder.appsink);  // borrowed; the bin owns it
-    }
-
-    gst_bin_add(GST_BIN(pipeline), eventRecorder.bin);
-    eventRecorder.tee_pad = gst_element_request_pad_simple(enc_tee, "src_%u");
-    GstPad *bin_sink = gst_element_get_static_pad(eventRecorder.bin, "sink");
-    if (gst_pad_link(eventRecorder.tee_pad, bin_sink) != GST_PAD_LINK_OK) {
-        g_printerr("event_recorder: failed to link tee -> branch\n");
-        gst_object_unref(bin_sink);
+    // Link the shared encoder in only once evq is running (avoids a flushing
+    // race on the shared streaming thread).
+    eventRecorder.enc_tee_pad = gst_element_request_pad_simple(eventRecorder.enc_tee, "src_%u");
+    GstPad *event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
+    if (gst_pad_link(eventRecorder.enc_tee_pad, event_queue_sink) != GST_PAD_LINK_OK) {
+        g_printerr("event_recorder: failed to link enc-tee -> backlog queue\n");
+        gst_object_unref(event_queue_sink);
         rct_gst_event_recorder_reset();
         return;
     }
-    gst_object_unref(bin_sink);
-    gst_element_sync_state_with_parent(eventRecorder.bin);
+    gst_object_unref(event_queue_sink);
 
     eventRecorder.fku_timer_id = g_timeout_add(EVR_FKU_MS, evr_force_keyframe, NULL);
-    g_print("Event recorder buffering started\n");
+    g_print("Event recorder armed (backlog %us, post %us)\n",
+            eventRecorder.video_pre_length, eventRecorder.video_post_length);
 }
 
 void rct_gst_event_recorder_save(const gchar *file_path)
 {
     if (file_path == NULL || *file_path == '\0') {
-        g_printerr("event_recorder save: no output path\n");
+        g_printerr("event save: no output path\n");
         return;
     }
-    if (!eventRecorder.bin) {
-        g_printerr("event_recorder save: not buffering\n");
+    if (!eventRecorder.event_queue || !eventRecorder.event_queue_src) {
+        g_printerr("event save: not buffering\n");
+        return;
+    }
+    if (eventRecorder.record_bin) {
+        g_printerr("event save: a clip is already recording\n");
+        return;
+    }
+    if (!pipeline) {
+        g_printerr("event save: pipeline not ready\n");
         return;
     }
 
-    g_mutex_lock(&eventRecorder.lock);
-    if (eventRecorder.pending) {
-        g_mutex_unlock(&eventRecorder.lock);
-        g_printerr("event_recorder save: a clip is already pending\n");
+    gchar *desc = g_strdup_printf(
+        "mp4mux name=evmux fragment-duration=1000 ! "
+        "filesink name=evsink async=false location=\"%s\"",
+        file_path);
+    GError *error = NULL;
+    eventRecorder.record_bin = gst_parse_bin_from_description(desc, TRUE, &error);
+    g_free(desc);
+    if (!eventRecorder.record_bin) {
+        g_printerr("event save: record bin build failed: %s\n", error ? error->message : "?");
+        if (error) g_error_free(error);
         return;
     }
-    GstSample *newest = g_queue_peek_tail(eventRecorder.ring);
-    GstClockTime now = newest ? sample_pts(newest) : GST_CLOCK_TIME_NONE;
-    if (!GST_CLOCK_TIME_IS_VALID(now)) {
-        g_mutex_unlock(&eventRecorder.lock);
-        g_printerr("event_recorder save: no buffered frames yet\n");
-        return;
-    }
-    eventRecorder.event_pts = now;
+
     eventRecorder.pending_path = g_strdup(file_path);
-    eventRecorder.pending = TRUE;
-    g_mutex_unlock(&eventRecorder.lock);
-    g_print("Event recorder: clip pending -> %s\n", file_path);
+    eventRecorder.buffer_count = 0;
+
+    GstElement *evsink = gst_bin_get_by_name(GST_BIN(eventRecorder.record_bin), "evsink");
+    if (evsink) {
+        GstPad *sp = gst_element_get_static_pad(evsink, "sink");
+        gst_pad_add_probe(sp, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, evr_eos_probe, NULL, NULL);
+        gst_object_unref(sp);
+        gst_object_unref(evsink);
+    }
+
+    // Attach the muxer after the (still blocked) backlog queue and bring it up
+    // BEFORE unblocking, so data only flows once the muxer is ready.
+    gst_bin_add(GST_BIN(pipeline), eventRecorder.record_bin);
+    GstPad *bin_sink = gst_element_get_static_pad(eventRecorder.record_bin, "sink");
+    if (gst_pad_link(eventRecorder.event_queue_src, bin_sink) != GST_PAD_LINK_OK) {
+        g_printerr("event save: failed to link backlog queue -> record bin\n");
+        gst_object_unref(bin_sink);
+        evr_drop_record_bin();
+        g_free(eventRecorder.pending_path); eventRecorder.pending_path = NULL;
+        return;
+    }
+    gst_object_unref(bin_sink);
+    gst_element_sync_state_with_parent(eventRecorder.record_bin);
+    gst_element_get_state(eventRecorder.record_bin, NULL, NULL, EVR_STATE_TIMEOUT);
+
+    // Gate the start on a keyframe, then unblock: the backlog flushes into the mux.
+    eventRecorder.gate_id = gst_pad_add_probe(eventRecorder.event_queue_src, GST_PAD_PROBE_TYPE_BUFFER,
+                                   evr_gate_probe_keyframe, NULL, NULL);
+    if (eventRecorder.block_id) {
+        gst_pad_remove_probe(eventRecorder.event_queue_src, eventRecorder.block_id);
+        eventRecorder.block_id = 0;
+    }
+
+    eventRecorder.stop_id = g_timeout_add(eventRecorder.video_post_length * 1000, evr_stop, NULL);
+    g_print("Event clip -> %s (backlog %us + %us live)\n",
+            file_path, eventRecorder.video_pre_length, eventRecorder.video_post_length);
 }
 
 gboolean rct_gst_event_recorder_is_buffering(void)
 {
-    return eventRecorder.bin != NULL;
+    return eventRecorder.event_queue != NULL;
 }
 
 void rct_gst_event_recorder_reset(void)
 {
-    if (!er_inited)
-        return;
+    if (eventRecorder.fku_timer_id)      { g_source_remove(eventRecorder.fku_timer_id);      eventRecorder.fku_timer_id = 0; }
+    if (eventRecorder.stop_id)     { g_source_remove(eventRecorder.stop_id);     eventRecorder.stop_id = 0; }
+    if (eventRecorder.watchdog_id) { g_source_remove(eventRecorder.watchdog_id); eventRecorder.watchdog_id = 0; }
 
-    if (eventRecorder.fku_timer_id) {
-        g_source_remove(eventRecorder.fku_timer_id);
-        eventRecorder.fku_timer_id = 0;
-    }
-    if (eventRecorder.bin) {
-        gst_element_set_state(eventRecorder.bin, GST_STATE_NULL);
-        GstObject *parent = gst_element_get_parent(eventRecorder.bin);
-        if (parent) {
-            gst_bin_remove(GST_BIN(parent), eventRecorder.bin);
-            gst_object_unref(parent);
-        } else {
-            gst_object_unref(eventRecorder.bin);
-        }
-        eventRecorder.bin = NULL;
-    }
-    if (eventRecorder.tee_pad) {
-        if (eventRecorder.enc_tee)
-            gst_element_release_request_pad(eventRecorder.enc_tee, eventRecorder.tee_pad);
-        gst_object_unref(eventRecorder.tee_pad);
-        eventRecorder.tee_pad = NULL;
-    }
-    if (eventRecorder.enc_tee) {
-        eventRecorder.enc_tee = NULL;   // borrowed from the shared encoder; don't unref
-        rct_gst_encoder_release();
-    }
-    eventRecorder.appsink = NULL;
-
-    g_mutex_lock(&eventRecorder.lock);
-    g_queue_foreach(eventRecorder.ring, (GFunc)gst_sample_unref, NULL);
-    g_queue_clear(eventRecorder.ring);
-    eventRecorder.pending = FALSE;
+    // Abandon any in-progress clip (no onEventSaved; fMP4 leaves it playable).
+    evr_drop_record_bin();
     g_free(eventRecorder.pending_path);
     eventRecorder.pending_path = NULL;
-    g_mutex_unlock(&eventRecorder.lock);
+
+    if (eventRecorder.event_queue_src) {
+        eventRecorder.gate_id = 0;
+        eventRecorder.block_id = 0;
+        gst_object_unref(eventRecorder.event_queue_src);
+        eventRecorder.event_queue_src = NULL;
+    }
+    if (eventRecorder.enc_tee) {
+        if (eventRecorder.enc_tee_pad) {
+            gst_element_release_request_pad(eventRecorder.enc_tee, eventRecorder.enc_tee_pad);
+            gst_object_unref(eventRecorder.enc_tee_pad);
+            eventRecorder.enc_tee_pad = NULL;
+        }
+        eventRecorder.enc_tee = NULL;
+        rct_gst_encoder_release();
+    }
+    if (eventRecorder.event_queue) {
+        gst_element_set_state(eventRecorder.event_queue, GST_STATE_NULL);
+        if (pipeline)
+            gst_bin_remove(GST_BIN(pipeline), eventRecorder.event_queue);
+        eventRecorder.event_queue = NULL;
+    }
 }
