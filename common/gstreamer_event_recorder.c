@@ -21,7 +21,6 @@
 #include "gstreamer_event_recorder.h"
 #include "gstreamer_backend.h"
 #include "gstreamer_encoder.h"
-#include <gst/video/video.h>
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
@@ -33,9 +32,8 @@ static const GstClockTime EVR_STATE_TIMEOUT    = 200 * GST_MSECOND;
 static const GstClockTime EVR_FINALIZE_TIMEOUT = 3 * GST_SECOND;
 
 typedef struct {
-    GstElement  *enc_tee;           // shared encoder's tee we requested a pad from (borrowed)
     GstElement  *event_queue;       // persistent leaky backlog queue, NULL when disarmed
-    GstPad      *enc_tee_pad;       // requested enc-tee src pad feeding evq
+    GstPad      *enc_tee_pad;       // src pad tapping the shared encoder, feeding evq
     GstPad      *event_queue_src;   // evq src pad — where we block / gate / push EOS
     gulong       block_id;          // block probe holding the backlog (armed-idle)
     gulong       gate_id;           // keyframe-gate probe active during a clip's start
@@ -175,19 +173,14 @@ static gboolean evr_stop(gpointer user_data)
     return G_SOURCE_REMOVE;
 }
 
-// Periodically ask the shared encoder for a keyframe (upstream event on the tee's
-// sink pad) so clips can start close to event-PRE
+// Periodically ask the shared encoder for a keyframe so clips can start close to
+// event-PRE.
 static gboolean evr_force_keyframe(gpointer user_data)
 {
     (void)user_data;
-    if (!eventRecorder.enc_tee)
+    if (!eventRecorder.event_queue)
         return G_SOURCE_REMOVE;
-    GstPad *pad = gst_element_get_static_pad(eventRecorder.enc_tee, "sink");
-    if (pad) {
-        gst_pad_send_event(pad, gst_video_event_new_upstream_force_key_unit(
-            GST_CLOCK_TIME_NONE, TRUE, 0));
-        gst_object_unref(pad);
-    }
+    rct_gst_encoder_force_keyframe();
     return G_SOURCE_CONTINUE;
 }
 
@@ -206,11 +199,6 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
         return;
     }
 
-    eventRecorder.enc_tee = rct_gst_encoder_acquire();
-    if (!eventRecorder.enc_tee) {
-        g_printerr("event_recorder: shared encoder unavailable (pipeline not ready)\n");
-        return;
-    }
     eventRecorder.video_pre_length  = (video_pre_length  > 0) ? (guint)video_pre_length  : 0;
     eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
 
@@ -233,7 +221,12 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
 
     // Link the shared encoder in only once evq is running (avoids a flushing
     // race on the shared streaming thread).
-    eventRecorder.enc_tee_pad = gst_element_request_pad_simple(eventRecorder.enc_tee, "src_%u");
+    eventRecorder.enc_tee_pad = rct_gst_encoder_request_src_pad();
+    if (!eventRecorder.enc_tee_pad) {
+        g_printerr("event_recorder: encoder gave no src pad\n");
+        rct_gst_event_recorder_reset();
+        return;
+    }
     GstPad *event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
     if (gst_pad_link(eventRecorder.enc_tee_pad, event_queue_sink) != GST_PAD_LINK_OK) {
         g_printerr("event_recorder: failed to link enc-tee -> backlog queue\n");
@@ -268,7 +261,7 @@ void rct_gst_event_recorder_save(const gchar *file_path)
     }
 
     gchar *desc = g_strdup_printf(
-        "mp4mux name=evmux fragment-duration=1000 ! "
+        "h264parse ! mp4mux name=evmux fragment-duration=1000 ! "
         "filesink name=evsink async=false location=\"%s\"",
         file_path);
     GError *error = NULL;
@@ -341,14 +334,9 @@ void rct_gst_event_recorder_reset(void)
         gst_object_unref(eventRecorder.event_queue_src);
         eventRecorder.event_queue_src = NULL;
     }
-    if (eventRecorder.enc_tee) {
-        if (eventRecorder.enc_tee_pad) {
-            gst_element_release_request_pad(eventRecorder.enc_tee, eventRecorder.enc_tee_pad);
-            gst_object_unref(eventRecorder.enc_tee_pad);
-            eventRecorder.enc_tee_pad = NULL;
-        }
-        eventRecorder.enc_tee = NULL;
-        rct_gst_encoder_release();
+    if (eventRecorder.enc_tee_pad) {
+        rct_gst_encoder_release_src_pad(eventRecorder.enc_tee_pad);
+        eventRecorder.enc_tee_pad = NULL;
     }
     if (eventRecorder.event_queue) {
         gst_element_set_state(eventRecorder.event_queue, GST_STATE_NULL);

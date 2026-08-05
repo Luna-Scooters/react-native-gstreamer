@@ -10,9 +10,10 @@
 //      video-tee ! queue ! videorate ! videoconvert ! <h264 enc>
 //                ! h264parse ! tee name=enc-tee
 //
-//  Consumers acquire() (which builds the branch on the first call), request a
-//  src pad from the returned enc-tee to attach their own sink branch, then
-//  release() when done (the branch is torn down on the last release).
+//  Consumers request_src_pad() to tap it (which builds the branch on the first
+//  request) and attach their own sink branch, then release_src_pad() when done.
+//  The branch is ref-counted by its outstanding src pads and torn down when the
+//  last one is released.
 //
 //  PTS repair (NONE -> running time, for broken-MJPEG frames) happens here at
 //  the encoder input; consumers still rebase their own output to start at 0.
@@ -23,13 +24,17 @@
 
 #include <gst/gst.h>
 
-// Build (if needed) and ref the shared encode branch; returns the "enc-tee"
-// element (borrowed — do not unref) to request src pads from, or NULL if the
-// pipeline isn't ready
-GstElement *rct_gst_encoder_acquire(void);
+// Request a src pad to tap the encoded H.264 stream. Builds the encoder on the
+// first request. The pad is a ghost exposed at the encoder BIN boundary; 
+// the caller owns the returned pad. NULL if the pipeline isn't ready.
+GstPad *rct_gst_encoder_request_src_pad(void);
 
-// Drop one ref; tears the branch down when the last consumer releases.
-void rct_gst_encoder_release(void);
+// Release a src pad from request_src_pad. Also drops the encoder's refcount; the
+// branch is torn down when the last pad is released
+void rct_gst_encoder_release_src_pad(GstPad *pad);
+
+// Ask the encoder for a keyframe
+void rct_gst_encoder_force_keyframe(void);
 
 // Force teardown regardless of refcount (pipeline re-init / terminate).
 void rct_gst_encoder_reset(void);

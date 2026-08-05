@@ -7,6 +7,7 @@
 #include "gstreamer_encoder.h"
 #include "gstreamer_backend.h"
 #include "gstreamer_codec.h"
+#include <gst/video/video.h>
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
@@ -20,13 +21,16 @@ static const gint MIN_BITRATE_KBPS = 500;
 static const gint MAX_BITRATE_KBPS = 4000;
 static const gdouble BITS_PER_PIXEL = 0.1;
 static const gint KEYFRAME_INTERVAL_SEC = 3;
+static const GstClockTime ENC_STATE_TIMEOUT = 500 * GST_MSECOND;
 
-static struct {
+typedef struct {
     GstElement *bin;      // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee)
-    GstElement *enc_tee;  // borrowed (owned by bin) — consumers request src pads here
+    GstElement *enc_tee;  // borrowed (owned by bin) — internal tap point
     GstPad     *tee_pad;  // video-tee src pad feeding the branch
     int         refcount;
-} enc;
+} RctGstEncoder;
+
+RctGstEncoder enc = { NULL, NULL, NULL, 0 };
 
 static void configure_h264_encoder()
 {
@@ -72,15 +76,13 @@ static GstPadProbeReturn enc_pts_repair_probe(GstPad *pad, GstPadProbeInfo *info
     return GST_PAD_PROBE_OK;
 }
 
-GstElement *rct_gst_encoder_acquire(void)
+static gboolean encoder_build(void)
 {
-    if (enc.bin) {
-        enc.refcount++;
-        return enc.enc_tee;
-    }
+    if (enc.bin)
+        return TRUE;
     if (!video_tee || !pipeline) {
         g_printerr("encoder: no video-tee available (pipeline not ready)\n");
-        return NULL;
+        return FALSE;
     }
 
     gint w, h, fps = FALLBACK_FPS;
@@ -99,8 +101,9 @@ GstElement *rct_gst_encoder_acquire(void)
     // consumer branch is being added or removed.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
-        "videorate ! videoconvert ! %s ! "
-        "%s name=venc ! h264parse config-interval=-1 ! tee name=enc-tee allow-not-linked=true",
+        "videorate skip-to-first=true ! videoconvert ! %s ! "
+        "%s name=venc ! h264parse config-interval=-1 ! "
+        "video/x-h264,stream-format=avc,alignment=au ! tee name=enc-tee allow-not-linked=true",
         caps->str, selected_encoder);
 
     GError *error = NULL;
@@ -111,7 +114,7 @@ GstElement *rct_gst_encoder_acquire(void)
     if (!enc.bin) {
         g_printerr("encoder: branch build failed: %s\n", error ? error->message : "?");
         if (error) g_error_free(error);
-        return NULL;
+        return FALSE;
     }
 
     configure_h264_encoder();
@@ -121,6 +124,11 @@ GstElement *rct_gst_encoder_acquire(void)
         gst_object_unref(enc.enc_tee);  // borrowed; the bin owns it
 
     gst_bin_add(GST_BIN(pipeline), enc.bin);
+
+    // Reach PLAYING BEFORE linking, pushing into a pad that is not active yet returns 
+    // GST_FLOW_FLUSHING, which the tee propagates upstream and the source task pauses for good
+    gst_element_sync_state_with_parent(enc.bin);
+    gst_element_get_state(enc.bin, NULL, NULL, ENC_STATE_TIMEOUT);
     enc.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
     gst_pad_add_probe(enc.tee_pad, GST_PAD_PROBE_TYPE_BUFFER, enc_pts_repair_probe, NULL, NULL);
     GstPad *bin_sink = gst_element_get_static_pad(enc.bin, "sink");
@@ -128,21 +136,72 @@ GstElement *rct_gst_encoder_acquire(void)
         g_printerr("encoder: failed to link video-tee -> encoder\n");
         gst_object_unref(bin_sink);
         rct_gst_encoder_reset();
-        return NULL;
+        return FALSE;
     }
     gst_object_unref(bin_sink);
-    gst_element_sync_state_with_parent(enc.bin);
-
-    enc.refcount = 1;
-    return enc.enc_tee;
+    return TRUE;
 }
 
-void rct_gst_encoder_release(void)
+GstPad *rct_gst_encoder_request_src_pad(void)
 {
+    if (!encoder_build())
+        return NULL;
+    GstPad *tee_src = gst_element_request_pad_simple(enc.enc_tee, "src_%u");
+    if (!tee_src) {
+        g_printerr("encoder: enc-tee gave no src pad\n");
+        return NULL;
+    }
+    GstPad *ghost = gst_ghost_pad_new(NULL, tee_src);
+    if (!ghost) {
+        gst_element_release_request_pad(enc.enc_tee, tee_src);
+        gst_object_unref(tee_src);
+        return NULL;
+    }
+    gst_object_unref(tee_src);            // the ghost references the target now
+    gst_pad_set_active(ghost, TRUE);
+    gst_element_add_pad(enc.bin, ghost);  // sinks the floating ref; the bin owns it
+    enc.refcount++;
+    return gst_object_ref(ghost);         // hand the caller its own ref
+}
+
+void rct_gst_encoder_release_src_pad(GstPad *pad)
+{
+    if (!pad)
+        return;
+    GstPad *tee_src = NULL;
+    if (GST_IS_GHOST_PAD(pad))
+        tee_src = gst_ghost_pad_get_target(GST_GHOST_PAD(pad));
+    gst_pad_set_active(pad, FALSE);
+    if (enc.bin)
+        gst_element_remove_pad(enc.bin, pad);  // drops the bin's ref
+    if (tee_src) {
+        if (enc.enc_tee)
+            gst_element_release_request_pad(enc.enc_tee, tee_src);
+        gst_object_unref(tee_src);
+    }
+    gst_object_unref(pad);  // drops the caller's ref from request_src_pad
+
+    // The src pads ARE the encoder's refcount: tear it down with the last one.
     if (enc.refcount > 0)
         enc.refcount--;
     if (enc.refcount == 0)
         rct_gst_encoder_reset();
+}
+
+void rct_gst_encoder_force_keyframe(void)
+{
+    if (!enc.enc_tee)
+        return;
+    GstPad *sink = gst_element_get_static_pad(enc.enc_tee, "sink");
+    if (!sink)
+        return;
+    GstPad *peer = gst_pad_get_peer(sink);
+    gst_object_unref(sink);
+    if (peer) {
+        gst_pad_send_event(peer, gst_video_event_new_upstream_force_key_unit(
+            GST_CLOCK_TIME_NONE, TRUE, 0));
+        gst_object_unref(peer);
+    }
 }
 
 void rct_gst_encoder_reset(void)
