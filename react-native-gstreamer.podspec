@@ -12,7 +12,7 @@ Pod::Spec.new do |s|
   s.platform     = :ios, "13.0"
   s.source       = { :git => "#{s.homepage}.git", :tag => "#{s.version}" }
 
-  s.source_files = "ios/RCTGstPlayer/*.{h,m}", "common/*.{h,c}"
+  s.source_files = "ios/RCTGstPlayer/*.{h,m}", "common/include/*.h", "common/src/*.c"
   s.public_header_files = "ios/RCTGstPlayer/*.h"
   
   gst_root = '$(PODS_ROOT)/../../GStreamer-iOS/GStreamer.xcframework'
