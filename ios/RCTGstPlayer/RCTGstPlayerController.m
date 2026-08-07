@@ -358,7 +358,7 @@ void onEventSaved(gchar *file_path) {
             return;
         }
         if (currentInstance->_view.onEventSaved)
-            currentInstance->_view.onEventSaved(@{@"path": path});
+            currentInstance->_view.onEventSaved(@{@"videoFilename": path});
     });
 }
 

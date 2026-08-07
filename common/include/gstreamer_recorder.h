@@ -1,11 +1,10 @@
 //
 //  gstreamer_recorder.h
 //
-//  Records the decoded video stream to an MP4 file by attaching a dynamic
-//  branch (queue ! videorate ! videoconvert ! <H.264 encoder> !
-//  h264parse ! mp4mux ! filesink) to the pipeline's "video-tee" element.
+//  Records the ride to an MP4 file: taps the shared H.264 encoder
+//  (gstreamer_encoder.c) and hands the muxing tail to a RctGstVideoWriter
 //
-//  Depends on gstreamer_backend.c for the pipeline/tee globals and the
+//  Depends on gstreamer_backend.c for the pipeline global and the
 //  onRecordingFinished callback.
 //
 

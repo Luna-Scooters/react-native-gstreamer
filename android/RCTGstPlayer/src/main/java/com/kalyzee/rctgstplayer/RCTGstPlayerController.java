@@ -122,7 +122,7 @@ public class RCTGstPlayerController
 
   public void onEventSaved(String path) {
     WritableMap event = Arguments.createMap();
-    event.putString("path", path);
+    event.putString("videoFilename", path);
     emitEvent("onEventSaved", event);
   }
 

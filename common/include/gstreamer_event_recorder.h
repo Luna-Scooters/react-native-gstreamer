@@ -8,8 +8,7 @@
 //  While armed, a leaky queue tapped off the shared encoder's enc-tee keeps the
 //  last PRE seconds of encoded H.264, held back by a BLOCKING pad probe so it
 //  accumulates but records nothing. On an event, it is unblocked: the backlog
-//  flushes into a new mp4mux, another POST seconds are recorded, then re-block and 
-//  push EOS to finalize the file.
+//  flushes into a RctGstVideoWriter.
 //
 
 #ifndef gstreamer_event_recorder_h
