@@ -525,6 +525,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *selected_decoder = rct_gst_find_jpeg_decoder();
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
+        "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
         "! rtpjpegdepay name=rtpjpegdepay0 "
         "! jpegparse "
         "! %s "
