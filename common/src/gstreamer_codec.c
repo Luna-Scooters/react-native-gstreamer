@@ -36,12 +36,12 @@ static gchar *find_best_element(GstElementFactoryListType type,
     return name ? name : g_strdup(fallback);
 }
 
-gchar *rct_gst_find_jpeg_decoder(void)
+gchar *rct_gst_find_h264_decoder(void)
 {
     gchar *name = find_best_element(
         GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-        "image/jpeg", GST_PAD_SINK, "jpegdec");
-    g_print("Using JPEG decoder: [%s]\n", name);
+        "video/x-h264", GST_PAD_SINK, "avdec_h264");
+    g_print("Using H264 decoder: [%s]\n", name);
     return name;
 }
 

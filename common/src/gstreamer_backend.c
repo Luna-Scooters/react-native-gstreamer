@@ -236,14 +236,14 @@ static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpoi
 static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_data)
 {
     (void)src; (void)user_data;
-    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
+    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "rtph264depay0");
     if (!depay)
         return;
     GstPad *sinkpad = gst_element_get_static_pad(depay, "sink");
     if (!gst_pad_is_linked(sinkpad)) {
         GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
         if (GST_PAD_LINK_FAILED(ret))
-            g_printerr("pad-added: rtspsrc -> rtpjpegdepay link failed (%d)\n", ret);
+            g_printerr("pad-added: rtspsrc -> rtph264depay link failed (%d)\n", ret);
     }
     gst_object_unref(sinkpad);
     gst_object_unref(depay);
@@ -448,48 +448,6 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     return validity;
 }
 
-static GstPadProbeReturn
-strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
-{
-    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-    gsize size = gst_buffer_get_size(buffer);
-
-    if (size < 4)
-        return GST_PAD_PROBE_OK;
-
-    GstMapInfo map;
-    if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
-        return GST_PAD_PROBE_OK;
-
-    /* RTSP server might send the full JPEG (SOI→EOI) as the RTP payload instead of
-     * RFC 2435 scan-data-only, so rtpjpegdepay prepends its own reconstructed
-     * header before the original JPEG, producing a buffer with two SOI markers.
-     * Find the second 0xFF 0xD8 and strip everything before it so jpegparse
-     * sees exactly one valid JPEG per buffer. */
-    gsize second_soi = (gsize)-1;
-    for (gsize i = 2; i + 1 < map.size; i++) {
-        if (map.data[i] == 0xFF && map.data[i + 1] == 0xD8) {
-            second_soi = i;
-            break;
-        }
-    }
-    gst_buffer_unmap(buffer, &map);
-
-    if (second_soi == (gsize)-1)
-        return GST_PAD_PROBE_OK;
-
-    GST_LOG_OBJECT(pad, "Stripping %zu-byte header prefix in rtpjpegdepay ", second_soi);
-
-    GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
-                                                  second_soi, size - second_soi);
-    if (!stripped)
-        return GST_PAD_PROBE_OK;
-    gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
-    gst_buffer_unref(stripped);
-
-    return GST_PAD_PROBE_OK;
-}
-
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
@@ -522,17 +480,17 @@ void rct_gst_init(RctGstConfiguration *configuration)
     const gchar *render_tail =
         "autovideoconvert ! glimagesink sync=false name=video-sink";
 #endif
-    gchar *selected_decoder = rct_gst_find_jpeg_decoder();
+    gchar *selected_decoder = rct_gst_find_h264_decoder();
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
-        "! rtpjpegdepay name=rtpjpegdepay0 "
-        "! jpegparse "
+        "! rtph264depay name=rtph264depay0 ! h264parse "
         "! %s "
         "! tee name=video-tee "
         "! queue "
         "! %s";
     launch_command_app = g_strdup_printf(pipeline_template, selected_decoder, render_tail);
+    g_print("Launch command: %s\n", launch_command_app);
     g_free(selected_decoder);
 
     // Prepare pipeline. If not working, will display an error video signal
@@ -543,16 +501,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
         g_printerr("Error creating pipeline: %s\n", error->message);
         g_error_free(error);
         return;
-    }
-
-    /* Strip the rtpjpegdepay-prepended reconstructed header before jpegparse
-     * sees the buffer, so it receives exactly one valid JPEG per frame. */
-    GstElement *depay_elem = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
-    if (depay_elem) {
-        GstPad *src_pad = gst_element_get_static_pad(depay_elem, "src");
-        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, strip_rtpjpeg_header, NULL, NULL);
-        gst_object_unref(src_pad);
-        gst_object_unref(depay_elem);
     }
 
     GstElement *tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
