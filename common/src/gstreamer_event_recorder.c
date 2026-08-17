@@ -29,6 +29,8 @@ extern GstElement *pipeline;
 #define EVR_FKU_MS   1000            // force a keyframe every second
 #define EVR_BACKLOG_SLACK_SEC 1                    // keep a bit more than PRE so the
                                                    // keyframe drop still leaves ~PRE s
+#define EVR_BACKLOG_MAX_FPS            60
+#define EVR_BACKLOG_MAX_BYTES_PER_SEC  (1024 * 1024)
 static const GstClockTime EVR_STATE_TIMEOUT    = 200 * GST_MSECOND;
 
 typedef struct {
@@ -130,11 +132,12 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
     eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
 
     // Leaky backlog: always keeps the most recent PRE (+slack) seconds.
+    guint backlog_sec = eventRecorder.video_pre_length + EVR_BACKLOG_SLACK_SEC;
     eventRecorder.event_queue = gst_element_factory_make("queue", "evq");
     g_object_set(eventRecorder.event_queue,
-        "max-size-buffers", (guint)0,
-        "max-size-bytes",   (guint)0,
-        "max-size-time",    (guint64)(eventRecorder.video_pre_length + EVR_BACKLOG_SLACK_SEC) * GST_SECOND,
+        "max-size-buffers", (guint)(backlog_sec * EVR_BACKLOG_MAX_FPS),
+        "max-size-bytes",   (guint)(backlog_sec * EVR_BACKLOG_MAX_BYTES_PER_SEC),
+        "max-size-time",    (guint64)backlog_sec * GST_SECOND,
         "leaky",            2,   // 2 = downstream: drop the OLDEST when full
         NULL);
     gst_bin_add(GST_BIN(pipeline), eventRecorder.event_queue);
