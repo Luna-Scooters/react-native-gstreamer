@@ -10,6 +10,7 @@
 #include <gst/gst.h>
 
 gchar *rct_gst_find_h264_decoder(void);
+gchar *rct_gst_find_jpeg_decoder(void);
 gchar *rct_gst_find_h264_encoder(void);
 
 // Tune an H.264 encoder element for small output files. Encoder-agnostic:

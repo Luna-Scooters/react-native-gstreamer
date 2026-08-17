@@ -45,6 +45,15 @@ gchar *rct_gst_find_h264_decoder(void)
     return name;
 }
 
+gchar *rct_gst_find_jpeg_decoder(void)
+{
+    gchar *name = find_best_element(
+        GST_ELEMENT_FACTORY_TYPE_DECODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
+        "image/jpeg", GST_PAD_SINK, "jpegdec");
+    g_print("Using JPEG decoder: [%s]\n", name);
+    return name;
+}
+
 gchar *rct_gst_find_h264_encoder(void)
 {
     gchar *name = find_best_element(
