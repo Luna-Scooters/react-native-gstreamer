@@ -347,6 +347,21 @@ void onRecordingFinished() {
         });
 }
 
+void onEventSaved(gchar *file_path) {
+    if (events_queue == NULL)
+        return;
+    // Copy the path now — the caller frees it as soon as this returns.
+    NSString *path = file_path ? [NSString stringWithUTF8String:file_path] : @"";
+    dispatch_async(events_queue, ^{
+        if (currentInstance == nil || currentInstance->_view == nil) {
+            NSLog(@"currentInstance or _view is nil, skipping event saved event");
+            return;
+        }
+        if (currentInstance->_view.onEventSaved)
+            currentInstance->_view.onEventSaved(@{@"videoFilename": path});
+    });
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
 
@@ -364,6 +379,7 @@ void onRecordingFinished() {
     configuration->onEOS = onEOS;
     configuration->onElementError = onElementError;
     configuration->onRecordingFinished = onRecordingFinished;
+    configuration->onEventSaved = onEventSaved;
 
     // Preparing pipeline
     rct_gst_init(configuration);

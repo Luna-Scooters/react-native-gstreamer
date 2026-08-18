@@ -55,8 +55,10 @@ public class RCTGstPlayerController
   nativeRCTGstSetAudioLevelRefreshRate(int audioLevelRefreshRate);
   private native void nativeRCTGstSetDebugging(boolean isDebugging);
 
-  private native void nativeRCTGstStartRecording(String path);
+  private native void nativeRCTGstStartRecording(String path, int videoEventPreLength, int videoEventPostLength);
   private native void nativeRCTGstStopRecording();
+
+  private native void nativeRCTGstSaveEvent(String path);
 
   private native void nativeRCTGstSetPipelineState(int state);
 
@@ -116,6 +118,12 @@ public class RCTGstPlayerController
 
   public void onRecordingFinished() {
     emitEvent("onRecordingFinished", null);
+  }
+
+  public void onEventSaved(String path) {
+    WritableMap event = Arguments.createMap();
+    event.putString("videoFilename", path);
+    emitEvent("onEventSaved", event);
   }
 
   private void emitEvent(String eventName, @Nullable WritableMap eventData) {
@@ -270,11 +278,13 @@ public class RCTGstPlayerController
   // Manager methods
   void setRctGstState(int state) { nativeRCTGstSetPipelineState(state); }
 
-  void startRecording(String path) {
-    nativeRCTGstStartRecording(path);
+  void startRecording(String path, int videoEventPreLength, int videoEventPostLength) {
+    nativeRCTGstStartRecording(path, videoEventPreLength, videoEventPostLength);
   }
 
   void stopRecording() { nativeRCTGstStopRecording(); }
+
+  void saveEvent(String path) { nativeRCTGstSaveEvent(path); }
 
   // External C Libraries
   static {

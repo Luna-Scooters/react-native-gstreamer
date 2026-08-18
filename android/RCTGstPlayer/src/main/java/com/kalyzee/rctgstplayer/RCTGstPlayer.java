@@ -58,10 +58,13 @@ public class RCTGstPlayer extends SimpleViewManager {
             this.playerController.setRctGstState(args.getInt(0));
 
         if (Command.is(commandType, Command.startRecording))
-            this.playerController.startRecording(args.getString(0));
+            this.playerController.startRecording(args.getString(0), args.getInt(1), args.getInt(2));
 
         if (Command.is(commandType, Command.stopRecording))
             this.playerController.stopRecording();
+
+        if (Command.is(commandType, Command.saveEvent))
+            this.playerController.saveEvent(args.getString(0));
 
         // recreateView is ignored on purpose : Not needed on android (wrong impl of vtdec on ios)
     }
@@ -95,6 +98,8 @@ public class RCTGstPlayer extends SimpleViewManager {
                         "onElementError", MapBuilder.of("registrationName", "onElementError")
                 ).put(
                         "onRecordingFinished", MapBuilder.of("registrationName", "onRecordingFinished")
+                ).put(
+                        "onEventSaved", MapBuilder.of("registrationName", "onEventSaved")
                 ).build();
     }
 

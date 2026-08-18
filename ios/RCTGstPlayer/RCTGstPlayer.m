@@ -41,6 +41,7 @@ RCT_EXPORT_VIEW_PROPERTY(onUriChanged, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onEOS, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onElementError, RCTBubblingEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onRecordingFinished, RCTBubblingEventBlock)
+RCT_EXPORT_VIEW_PROPERTY(onEventSaved, RCTBubblingEventBlock)
 
 // Methods
 RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber *)state) {
@@ -57,13 +58,22 @@ RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
 }
 
 RCT_EXPORT_METHOD(startRecording:(nonnull NSNumber *)reactTag
-                  path:(nonnull NSString *)path) {
-    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@", reactTag, path);
+                  path:(nonnull NSString *)path
+                  videoEventPreLength:(nonnull NSNumber *)videoEventPreLength
+                  videoEventPostLength:(nonnull NSNumber *)videoEventPostLength) {
+    NSLog(@"RCTGstPlayer : startRecording tag=%@ path=%@ eventPreLength=%@ eventPostLength=%@", reactTag, path, videoEventPreLength, videoEventPostLength);
     rct_gst_start_recording((const gchar *)[path UTF8String]);
+    rct_gst_event_recorder_set_buffering(TRUE, [videoEventPreLength intValue], [videoEventPostLength intValue]);
 }
 
 RCT_EXPORT_METHOD(stopRecording:(nonnull NSNumber *)reactTag) {
     rct_gst_stop_recording();
+}
+
+RCT_EXPORT_METHOD(saveEvent:(nonnull NSNumber *)reactTag
+                  path:(nonnull NSString *)path) {
+    NSLog(@"RCTGstPlayer : saveEvent tag=%@ path=%@", reactTag, path);
+    rct_gst_event_recorder_save((const gchar *)[path UTF8String]);
 }
 
 // react-native init

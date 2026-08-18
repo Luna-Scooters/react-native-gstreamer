@@ -7,12 +7,10 @@ TARGET_LDFLAGS += -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384
 include $(CLEAR_VARS)
 
 LOCAL_MODULE    := rctgstplayer
-LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../../../../common
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/../../../../../common/include
 
 LOCAL_SRC_FILES := rctgstplayer.c \
-                   $(LOCAL_PATH)/../../../../../common/gstreamer_backend.c \
-                   $(LOCAL_PATH)/../../../../../common/gstreamer_recorder.c \
-                   $(LOCAL_PATH)/../../../../../common/gstreamer_codec.c
+                   $(wildcard $(LOCAL_PATH)/../../../../../common/src/*.c)
 
 LOCAL_SHARED_LIBRARIES := gstreamer_android
 LOCAL_LDLIBS := -llog -landroid

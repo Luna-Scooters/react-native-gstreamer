@@ -5,6 +5,7 @@
 #include <android/native_window_jni.h>
 #include <gst/gst.h>
 #include <gstreamer_backend.h>
+#include <gstreamer_event_recorder.h>
 #include <pthread.h>
 
 ANativeWindow *native_window;
@@ -17,6 +18,7 @@ static jmethodID on_uri_changed_id;
 static jmethodID on_eos_id;
 static jmethodID on_element_error_id;
 static jmethodID on_recording_finished_id;
+static jmethodID on_event_saved_id;
 
 // Global context
 pthread_t gst_app_thread;
@@ -112,11 +114,12 @@ static void native_rct_gst_set_debugging(JNIEnv* env, jobject thiz, jboolean is_
     rct_gst_set_debugging(is_debugging);
 }
 
-static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j)
+static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j, jint video_event_pre_length, jint video_event_post_length)
 {
     (void)thiz;
     const char *path = (*env)->GetStringUTFChars(env, path_j, 0);
     rct_gst_start_recording((const gchar *)path);
+    rct_gst_event_recorder_set_buffering(TRUE, (gint)video_event_pre_length, (gint)video_event_post_length);
     (*env)->ReleaseStringUTFChars(env, path_j, path);
 }
 
@@ -125,6 +128,14 @@ static void native_rct_gst_stop_recording(JNIEnv* env, jobject thiz)
     (void)env;
     (void)thiz;
     rct_gst_stop_recording();
+}
+
+static void native_rct_gst_save_event(JNIEnv* env, jobject thiz, jstring path_j)
+{
+    (void)thiz;
+    const char *path = (*env)->GetStringUTFChars(env, path_j, 0);
+    rct_gst_event_recorder_save((const gchar *)path);
+    (*env)->ReleaseStringUTFChars(env, path_j, path);
 }
 
 
@@ -175,6 +186,14 @@ void native_on_recording_finished()
     (*env)->CallVoidMethod(env, app, on_recording_finished_id);
 }
 
+void native_on_event_saved(gchar *file_path)
+{
+    JNIEnv *env = get_jni_env();
+    jstring path = (*env)->NewStringUTF(env, file_path ? file_path : "");
+    (*env)->CallVoidMethod(env, app, on_event_saved_id, path);
+    (*env)->DeleteLocalRef(env, path);
+}
+
 static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_configuration)
 {
     RctGstConfiguration* configuration = rct_gst_get_configuration();
@@ -198,6 +217,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     on_eos_id = (*env)->GetMethodID(env, klass, "onEOS", "()V");
     on_element_error_id = (*env)->GetMethodID(env, klass, "onElementError", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
     on_recording_finished_id = (*env)->GetMethodID(env, klass, "onRecordingFinished", "()V");
+    on_event_saved_id = (*env)->GetMethodID(env, klass, "onEventSaved", "(Ljava/lang/String;)V");
 
     configuration->onInit = native_on_init;
     configuration->onStateChanged = native_on_state_changed;
@@ -206,6 +226,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     configuration->onEOS = native_on_eos;
     configuration->onElementError = native_on_element_error;
     configuration->onRecordingFinished = native_on_recording_finished;
+    configuration->onEventSaved = native_on_event_saved;
 
     rct_gst_init(configuration);
 
@@ -224,8 +245,9 @@ static JNINativeMethod native_methods[] = {
         { "nativeRCTGstSetAudioLevelRefreshRate", "(I)V", (void *) native_rct_gst_set_audio_level_refresh_rate },
         { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging },
 
-        { "nativeRCTGstStartRecording", "(Ljava/lang/String;)V", (void *) native_rct_gst_start_recording },
-        { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording }
+        { "nativeRCTGstStartRecording", "(Ljava/lang/String;II)V", (void *) native_rct_gst_start_recording },
+        { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording },
+        { "nativeRCTGstSaveEvent", "(Ljava/lang/String;)V", (void *) native_rct_gst_save_event }
 };
 
 // Called by JNI
