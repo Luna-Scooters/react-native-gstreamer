@@ -19,6 +19,7 @@
     EaglUIView *drawableSurface;
     
     atomic_bool runCopyImageThread;
+    atomic_bool captureFrames;
     dispatch_queue_t imageCaptureQueue;
     long lastCaptureTimeMs;
     long captureFps;
@@ -417,6 +418,9 @@ void onEventSaved(gchar *file_path) {
 }
 
 - (void)startImageCaptureThread {
+    if (!atomic_load(&captureFrames)) {
+        return;
+    }
     NSLog(@"Initializing and starting image capture thread");
     if (imageCaptureQueue == NULL) {
         imageCaptureQueue = dispatch_queue_create("RctGstImageCaptureQueue", 0);
@@ -433,6 +437,15 @@ void onEventSaved(gchar *file_path) {
 - (void)stopImageCapture {
     NSLog(@"Stopping image capture thread");
     atomic_store(&runCopyImageThread, false);
+}
+
+- (void)setCaptureFrames:(BOOL)enable {
+    atomic_store(&captureFrames, enable);
+    if (enable) {
+        [self startImageCaptureThread];
+    } else {
+        [self stopImageCapture];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated

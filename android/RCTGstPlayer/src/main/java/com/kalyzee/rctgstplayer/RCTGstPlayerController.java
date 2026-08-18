@@ -46,6 +46,7 @@ public class RCTGstPlayerController
   private AtomicBoolean runCopyImageThread = new AtomicBoolean(false);
   private CountDownLatch latchCopyImage;
   private Thread thCopyImage;
+  private final AtomicBoolean captureFrames = new AtomicBoolean(false);
 
   // Native methods
   private native String nativeRCTGstGetGStreamerInfo();
@@ -204,6 +205,30 @@ public class RCTGstPlayerController
     }
   }
 
+  private synchronized void startCaptureThread() {
+    if (!captureFrames.get() || !isInited || runCopyImageThread.get()) {
+      return;
+    }
+    runCopyImageThread.set(true);
+    thCopyImage = new Thread(this::threadCopyImageFunc);
+    thCopyImage.start();
+  }
+
+  private synchronized void stopCaptureThread() {
+    if (!runCopyImageThread.get()) {
+      return;
+    }
+    runCopyImageThread.set(false);
+    try {
+      if (thCopyImage != null) {
+        thCopyImage.join();
+      }
+    } catch (InterruptedException e) {
+      throw new RuntimeException(e);
+    }
+    thCopyImage = null;
+  }
+
   // Surface callbacks
   @Override
   public void surfaceCreated(SurfaceHolder holder) {
@@ -215,12 +240,10 @@ public class RCTGstPlayerController
       // Init and run our pipeline
       nativeRCTGstInitAndRun(this.configuration);
 
-      runCopyImageThread.set(true);
-      thCopyImage = new Thread(() -> { threadCopyImageFunc(); });
-      thCopyImage.start();
-
       // Init done
       this.isInited = true;
+
+      startCaptureThread();
     }
   }
 
@@ -232,12 +255,7 @@ public class RCTGstPlayerController
 
   @Override
   public void surfaceDestroyed(SurfaceHolder holder) {
-    runCopyImageThread.set(false);
-    try {
-      thCopyImage.join();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
+    stopCaptureThread();
   }
 
   // Constructor
@@ -273,6 +291,15 @@ public class RCTGstPlayerController
 
   void setRctGstDebugging(boolean isDebugging) {
     nativeRCTGstSetDebugging(isDebugging);
+  }
+
+  void setCaptureFrames(boolean enable) {
+    captureFrames.set(enable);
+    if (enable) {
+      startCaptureThread();
+    } else {
+      stopCaptureThread();
+    }
   }
 
   // Manager methods

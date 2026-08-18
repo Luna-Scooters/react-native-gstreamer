@@ -16,5 +16,6 @@
 }
 - (void) recreateView;
 - (void) stopImageCapture;
+- (void) setCaptureFrames:(BOOL)enable;
 - (RctGstConfiguration *) getConfiguration;
 @end

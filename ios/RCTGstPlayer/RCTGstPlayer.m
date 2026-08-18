@@ -32,6 +32,11 @@ RCT_CUSTOM_VIEW_PROPERTY(isDebugging, BOOL, RCTGstPlayerController)
     gboolean isDebugging = [RCTConvert BOOL:json];
     rct_gst_set_debugging(isDebugging);
 }
+RCT_CUSTOM_VIEW_PROPERTY(captureFrames, BOOL, RCTGstPlayerController)
+{
+    (void)view;
+    [self->playerController setCaptureFrames:[RCTConvert BOOL:json]];
+}
 
 // Shared events
 RCT_EXPORT_VIEW_PROPERTY(onPlayerInit, RCTBubblingEventBlock)
