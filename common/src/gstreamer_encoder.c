@@ -48,6 +48,11 @@ static void configure_h264_encoder()
     }
 }
 
+// Anchor for enc_out_fixup_probe below: the timestamp of the encoder's very first
+// input frame, whether the camera supplied it or the repair below did.
+static GstClockTime enc_first_in_pts = GST_CLOCK_TIME_NONE;
+static gboolean     enc_out_checked  = FALSE;
+
 // Give videorate/the encoder a valid PTS even when the camera delivers broken
 // MJPEG frames (jpegparse flushes them with PTS=NONE). Repair only — consumers
 // rebase their own output to zero. Runs on the streaming thread.
@@ -55,8 +60,13 @@ static GstPadProbeReturn enc_pts_repair_probe(GstPad *pad, GstPadProbeInfo *info
 {
     (void)pad; (void)user_data;
     GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (buffer == NULL || GST_BUFFER_PTS_IS_VALID(buffer))
+    if (buffer == NULL)
         return GST_PAD_PROBE_OK;
+    if (GST_BUFFER_PTS_IS_VALID(buffer)) {
+        if (!GST_CLOCK_TIME_IS_VALID(enc_first_in_pts))
+            enc_first_in_pts = GST_BUFFER_PTS(buffer);
+        return GST_PAD_PROBE_OK;
+    }
     if (!pipeline)
         return GST_PAD_PROBE_OK;
 
@@ -73,6 +83,41 @@ static GstPadProbeReturn enc_pts_repair_probe(GstPad *pad, GstPadProbeInfo *info
     GST_BUFFER_PTS(buffer) = now - base;
     GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
     GST_PAD_PROBE_INFO_DATA(info) = buffer;
+    if (!GST_CLOCK_TIME_IS_VALID(enc_first_in_pts))
+        enc_first_in_pts = now - base;
+    return GST_PAD_PROBE_OK;
+}
+
+// Repair the encoder's first OUTPUT buffer.
+//
+// amcvidenc (Exynos) returns its first encoded buffer stamped pts=0 with no DTS,
+// no matter where the input timeline actually starts.
+
+static GstPadProbeReturn enc_out_fixup_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    (void)pad; (void)user_data;
+    if (enc_out_checked)
+        return GST_PAD_PROBE_OK;
+    GstBuffer *buf = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (!buf || !GST_CLOCK_TIME_IS_VALID(enc_first_in_pts))
+        return GST_PAD_PROBE_OK;   // nothing to anchor against yet
+    enc_out_checked = TRUE;
+
+    // The encoder cannot legitimately emit a frame from before its first input.
+    gboolean bogus = !GST_BUFFER_PTS_IS_VALID(buf) ||
+                     GST_BUFFER_PTS(buf) + GST_SECOND < enc_first_in_pts;
+    if (!bogus)
+        return GST_PAD_PROBE_OK;
+
+    g_print("encoder: re-stamped first output buffer (pts was %.3f, first input %.3f)\n",
+            GST_BUFFER_PTS_IS_VALID(buf) ? (gdouble)GST_BUFFER_PTS(buf) / GST_SECOND : -1.0,
+            (gdouble)enc_first_in_pts / GST_SECOND);
+
+    buf = gst_buffer_make_writable(buf);
+    GST_BUFFER_PTS(buf) = enc_first_in_pts;
+    if (!GST_BUFFER_DTS_IS_VALID(buf))
+        GST_BUFFER_DTS(buf) = enc_first_in_pts;
+    GST_PAD_PROBE_INFO_DATA(info) = buf;
     return GST_PAD_PROBE_OK;
 }
 
@@ -122,6 +167,18 @@ static gboolean encoder_build(void)
     enc.enc_tee = gst_bin_get_by_name(GST_BIN(enc.bin), "enc-tee");
     if (enc.enc_tee)
         gst_object_unref(enc.enc_tee);  // borrowed; the bin owns it
+
+    // Watch the encoder's OUTPUT: amcvidenc stamps its first buffer 0 (see
+    // enc_out_fixup_probe). enc-tee's sink is the single point every consumer's
+    // frames pass through.
+    if (enc.enc_tee) {
+        GstPad *tee_sink = gst_element_get_static_pad(enc.enc_tee, "sink");
+        if (tee_sink) {
+            gst_pad_add_probe(tee_sink, GST_PAD_PROBE_TYPE_BUFFER,
+                              enc_out_fixup_probe, NULL, NULL);
+            gst_object_unref(tee_sink);
+        }
+    }
 
     gst_bin_add(GST_BIN(pipeline), enc.bin);
 
@@ -225,4 +282,6 @@ void rct_gst_encoder_reset(void)
     }
     enc.enc_tee = NULL;
     enc.refcount = 0;
+    enc_first_in_pts = GST_CLOCK_TIME_NONE;
+    enc_out_checked = FALSE;
 }
