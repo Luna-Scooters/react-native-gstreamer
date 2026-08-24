@@ -33,6 +33,17 @@ public class RCTGstPlayer extends SimpleViewManager {
         return this.playerController.getView();
     }
 
+    @Override
+    public void onDropViewInstance(View view) {
+        // The view is going away: shut the pipeline down before React Native
+        // releases the surface it draws into.
+        if (this.playerController != null && this.playerController.getView() == view) {
+            this.playerController.terminate();
+            this.playerController = null;
+        }
+        super.onDropViewInstance(view);
+    }
+
     // Shared properties
     @ReactProp(name = "uri")
     public void setUri(View controllerView, String uri) {
