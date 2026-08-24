@@ -142,14 +142,30 @@ static gboolean encoder_build(void)
     GString *caps = g_string_new("video/x-raw");
     g_string_append_printf(caps, ",framerate=%d/1", fps);
 
+#if defined(__APPLE__)
+    const gchar *gl_normalize = "";
+#else
+    // Hardware H264 decoders on Android (amcviddec) commonly can't do direct
+    // byte-buffer output and hand frames back as Surface/OES-textured GL
+    // memory instead. videorate/videoconvert only understand system memory,
+    // so normalize through GL first — a no-op pass-through when the shared
+    // decode chain already produced system memory (e.g. software jpegdec).
+    // The explicit texture-target=2D forces glcolorconvert to actually run
+    // its OES-aware shader and produce a regular sampleable texture; without
+    // it caps negotiation can pass the external-oes texture straight through
+    // to gldownload, which can only map plain 2D GL textures.
+    const gchar *gl_normalize =
+        "glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),texture-target=2D ! gldownload ! ";
+#endif
+
     // allow-not-linked keeps the tee running through the brief windows where a
     // consumer branch is being added or removed.
     gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
-        "videorate skip-to-first=true ! videoconvert ! %s ! "
+        "%svideorate skip-to-first=true ! videoconvert ! %s ! "
         "%s name=venc ! h264parse config-interval=-1 ! "
         "video/x-h264,stream-format=avc,alignment=au ! tee name=enc-tee allow-not-linked=true",
-        caps->str, selected_encoder);
+        gl_normalize, caps->str, selected_encoder);
 
     GError *error = NULL;
     enc.bin = gst_parse_bin_from_description(desc, TRUE, &error);
