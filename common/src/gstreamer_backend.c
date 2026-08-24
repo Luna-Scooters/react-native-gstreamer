@@ -24,6 +24,13 @@ GMainLoop *main_loop;
 guint bus_watch_id;
 GstBus *bus;
 
+// Serializes video_sink between the main thread (which swaps it on surface
+// changes and drops it on re-init / terminate) and the image-capture thread
+// (rct_gst_pull_last_sample). All backend state lives in these file globals and
+// is shared by every player instance, so a new instance's rct_gst_init can race
+// an old instance's still-running capture loop.
+static GMutex video_sink_lock;
+
 // Video
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
@@ -80,7 +87,14 @@ void rct_gst_set_uri(gchar* _uri)
     g_free(last_applied_uri);
     last_applied_uri = g_strdup(_uri);
 
-    rct_gst_get_configuration()->uri = _uri;
+    // Own the string: callers pass transient buffers (JNI GetStringUTFChars,
+    // -[NSString UTF8String]) that are released as soon as they return, so
+    // storing the caller's pointer would leave configuration->uri dangling.
+    RctGstConfiguration *cfg = rct_gst_get_configuration();
+    gchar *previous_uri = cfg->uri;
+    cfg->uri = g_strdup(_uri);
+    g_free(previous_uri);
+
     if (pipeline)
         apply_uri();
 }
@@ -112,7 +126,14 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     
     if(pipeline)
     {
+        // gst_bin_get_by_name returns a NEW ref each call (this runs on every
+        // surface change), so drop the one we already hold before replacing it.
+        g_mutex_lock(&video_sink_lock);
+        GstElement *previous_sink = video_sink;
         video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
+        g_mutex_unlock(&video_sink_lock);
+        if (previous_sink)
+            gst_object_unref(previous_sink);
         
         // Configure the video sink if we have one
         if (video_sink) {
@@ -135,10 +156,11 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
 
 GstSample *rct_gst_pull_last_sample(void)
 {
-    if (!video_sink)
-        return NULL;
+    g_mutex_lock(&video_sink_lock);
     GstSample *sample = NULL;
-    g_object_get(video_sink, "last-sample", &sample, NULL);
+    if (video_sink)
+        g_object_get(video_sink, "last-sample", &sample, NULL);
+    g_mutex_unlock(&video_sink_lock);
     return sample;
 }
 
@@ -609,6 +631,11 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
 
+    if (!pipeline) {
+        g_printerr("Pipeline state change ignored : no pipeline\n");
+        return GST_STATE_CHANGE_FAILURE;
+    }
+
     if (rct_gst_is_recording() && pipeline && state < GST_STATE_PLAYING) {
         g_print("Recording active - deferring state change until finalized\n");
         rct_gst_recorder_defer_state(state);
@@ -621,29 +648,62 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     return validity;
 }
 
+// Destroy the pipeline and everything hanging off it. Ordering matters: nothing
+// may still be able to reach the pipeline once its last ref is dropped.
+//
+//   1. consumer branches (they hold request pads on the pipeline's tees),
+//   2. the bus watch AND the bus sync handler - the sync handler runs on a
+//      streaming thread and reads video_overlay / drawable_surface, and the watch
+//      dereferences `pipeline` from the GMainLoop thread, which is NOT the thread
+//      calling this on either platform,
+//   3. the state change to NULL, which joins the streaming threads,
+//   4. the last ref.
+//
+// Safe to call with no pipeline, and safe to call twice.
+static void destroy_pipeline(void)
+{
+    rct_gst_recorder_reset();
+    rct_gst_event_recorder_reset();
+    rct_gst_encoder_reset();
+
+    if (bus_watch_id) {
+        g_source_remove(bus_watch_id);
+        bus_watch_id = 0;
+    }
+
+    if (pipeline) {
+        GstBus *pipeline_bus = gst_element_get_bus(pipeline);
+        if (pipeline_bus) {
+            gst_bus_set_sync_handler(pipeline_bus, NULL, NULL, NULL);
+            gst_object_unref(pipeline_bus);
+        }
+
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        pipeline = NULL;
+    }
+    bus = NULL;   // unreffed in rct_gst_init; never dereference it again
+
+    // video_overlay is a cast of video_sink, NOT a second ref - clearing the
+    // pointer is the whole job. Unreffing it too would over-unref the sink.
+    g_mutex_lock(&video_sink_lock);
+    GstElement *sink = video_sink;
+    video_sink = NULL;
+    g_mutex_unlock(&video_sink_lock);
+    if (sink)
+        gst_object_unref(sink);
+
+    video_overlay = NULL;
+    video_tee = NULL;
+    audio_level_element = NULL;   // owned by the bin from create_audio_sink()
+}
+
 void rct_gst_init(RctGstConfiguration *configuration)
 {
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
-    rct_gst_recorder_reset();
-    rct_gst_event_recorder_reset();
-    rct_gst_encoder_reset();
-    if (pipeline) {
-        gst_element_set_state(pipeline, GST_STATE_NULL);
-        if (bus_watch_id) {
-            g_source_remove(bus_watch_id);
-            bus_watch_id = 0;
-        }
-        gst_object_unref(pipeline);
-        pipeline = NULL;
-    }
-    if (video_sink) {
-        gst_object_unref(video_sink);
-        video_sink = NULL;
-    }
-    video_overlay = NULL;
-    video_tee = NULL;
+    destroy_pipeline();
 
 #if defined(__APPLE__)
     const gchar *render_tail =
@@ -673,6 +733,13 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (error != NULL) {
         g_printerr("Error creating pipeline: %s\n", error->message);
         g_error_free(error);
+        // A failed parse can still hand back a partial pipeline; don't keep it,
+        // every other entry point treats a non-NULL pipeline as usable.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+            pipeline = NULL;
+        }
+        g_free(launch_command_app);
         return;
     }
 
@@ -709,46 +776,73 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();
     }
+
+    g_free(launch_command_app);
 }
 
 void rct_gst_run_loop()
 {
-    main_loop = g_main_loop_new(NULL, FALSE);
-    g_main_loop_run(main_loop);
+    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+    main_loop = loop;
+
+    g_main_loop_run(loop);
+
+    // The loop's ref belongs here, to the function that created it:
+    // rct_gst_terminate() only quits it. g_main_loop_run holds its own ref while
+    // running, so this is the unref that actually frees it - and it happens on
+    // the loop thread, after the loop has stopped.
+    if (main_loop == loop)
+        main_loop = NULL;
+    g_main_loop_unref(loop);
 }
 
 void rct_gst_terminate()
 {
-    /* Free resources */
-    if(video_sink != NULL)
-        gst_object_unref(video_sink);
-    
-    if(video_overlay != NULL)
-        gst_object_unref(video_overlay);
-    
-    if(drawable_surface)
-        drawable_surface = 0;
+    // Tear the pipeline down first: this cancels the bus watch and every timer,
+    // probe and branch that could still call back into the state freed below.
+    destroy_pipeline();
 
-    rct_gst_recorder_reset();
-    rct_gst_event_recorder_reset();
-    rct_gst_encoder_reset();
+    drawable_surface = 0;
 
-    rct_gst_set_pipeline_state(GST_STATE_NULL);
-    gst_object_unref(pipeline);
-    
-    g_source_remove(bus_watch_id);
-    g_main_loop_unref(main_loop);
-    
-    g_free(configuration->audioLevelRefreshRate);
-    g_free(configuration);
-    g_free(audio_level);
-    
-    pipeline = NULL;
-    configuration = NULL;
-    audio_level = NULL;
-    video_sink = NULL;
-    video_overlay = NULL;
-    video_tee = NULL;
+    // Stop the GMainLoop. It is running on another thread (a pthread on Android,
+    // a dispatch queue on iOS), so it owns its own ref and unrefs it in
+    // rct_gst_run_loop once g_main_loop_run returns. Callers that need the
+    // thread to be gone before they release the surface must join it.
+    if (main_loop)
+        g_main_loop_quit(main_loop);
+
+    // `configuration` and `audio_level` are deliberately NOT freed. Both are lazy
+    // process-lifetime singletons, and the bus watch reads them from the GMainLoop
+    // thread: g_source_remove (in destroy_pipeline) unregisters the watch but does
+    // NOT wait for a dispatch that is already running to return, so freeing them
+    // here can race a live cb_state_changed / cb_message_element. Resetting them
+    // instead costs one fixed allocation for the life of the process and removes
+    // the use-after-free entirely - and the next rct_gst_init repopulates both.
+    if (configuration) {
+        g_free(configuration->uri);
+        configuration->uri = NULL;
+
+        configuration->isDebugging = FALSE;
+        configuration->initialDrawableSurface = 0;
+        if (configuration->audioLevelRefreshRate)
+            *(configuration->audioLevelRefreshRate) = 100;
+
+        configuration->onInit = NULL;
+        configuration->onStateChanged = NULL;
+        configuration->onVolumeChanged = NULL;
+        configuration->onUriChanged = NULL;
+        configuration->onEOS = NULL;
+        configuration->onElementError = NULL;
+        configuration->onRecordingFinished = NULL;
+        configuration->onEventSaved = NULL;
+    }
+
+    if (audio_level) {
+        audio_level->rms = 0;
+        audio_level->peak = 0;
+        audio_level->decay = 0;
+    }
+
     g_free(last_applied_uri);
     last_applied_uri = NULL;
 }
