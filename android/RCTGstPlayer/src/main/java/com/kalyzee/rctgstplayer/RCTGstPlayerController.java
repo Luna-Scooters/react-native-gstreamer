@@ -65,6 +65,8 @@ public class RCTGstPlayerController
 
   private native void nativeRCTGstInitAndRun(RCTGstConfiguration configuration);
 
+  private native void nativeRCTGstTerminate();
+
   // Configuration callbacks
   @Override
   public void onInit() {
@@ -256,6 +258,22 @@ public class RCTGstPlayerController
   @Override
   public void surfaceDestroyed(SurfaceHolder holder) {
     stopCaptureThread();
+  }
+
+  // Called from RCTGstPlayer.onDropViewInstance, i.e. when the JS component
+  // unmounts. Without this the pipeline stays in PLAYING: the RTSP session and
+  // the hardware H.264 encoder session (of which there is typically only one)
+  // would stay held for the lifetime of the process, so the next mount could not
+  // encode. Runs on the UI thread.
+  synchronized void terminate() {
+    stopCaptureThread();
+
+    if (!isInited) {
+      return;
+    }
+    isInited = false;
+
+    nativeRCTGstTerminate();
   }
 
   // Constructor

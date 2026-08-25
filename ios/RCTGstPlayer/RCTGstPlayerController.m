@@ -21,6 +21,7 @@
     atomic_bool runCopyImageThread;
     atomic_bool captureFrames;
     dispatch_queue_t imageCaptureQueue;
+    dispatch_semaphore_t imageCaptureDone;
     long lastCaptureTimeMs;
     long captureFps;
     long capturePeriodMs;
@@ -428,8 +429,15 @@ void onEventSaved(gchar *file_path) {
     
     if (!atomic_load(&runCopyImageThread)) {
         atomic_store(&runCopyImageThread, true);
+
+        // Signalled when the loop leaves threadCopyImageFunc, so stopImageCapture
+        // can wait for it instead of just asking it to stop.
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        imageCaptureDone = done;
+
         dispatch_async(imageCaptureQueue, ^{
             [self threadCopyImageFunc];
+            dispatch_semaphore_signal(done);
         });
     }
 }
@@ -437,6 +445,23 @@ void onEventSaved(gchar *file_path) {
 - (void)stopImageCapture {
     NSLog(@"Stopping image capture thread");
     atomic_store(&runCopyImageThread, false);
+
+    // Wait for the loop to actually exit, don't just ask it to. It reads the
+    // backend's video sink through rct_gst_pull_last_sample, and that backend
+    // state is file-global -- shared by every player instance -- so returning
+    // while a capture is still in flight lets rct_gst_terminate (or a new
+    // instance's rct_gst_init) drop the sink underneath it.
+    //
+    // Bounded, so a wedged Vulkan readback can't hang the caller; the backend
+    // also holds a lock around the sink to keep that case safe.
+    dispatch_semaphore_t done = imageCaptureDone;
+    imageCaptureDone = nil;
+    if (done == nil)
+        return;
+
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW,
+                                                    (int64_t)(2 * NSEC_PER_SEC))) != 0)
+        NSLog(@"Image capture thread did not stop within 2s");
 }
 
 - (void)setCaptureFrames:(BOOL)enable {

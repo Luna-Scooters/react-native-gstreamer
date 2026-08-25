@@ -24,6 +24,13 @@ GMainLoop *main_loop;
 guint bus_watch_id;
 GstBus *bus;
 
+// Serializes video_sink between the main thread (which swaps it on surface
+// changes and drops it on re-init / terminate) and the image-capture thread
+// (rct_gst_pull_last_sample). All backend state lives in these file globals and
+// is shared by every player instance, so a new instance's rct_gst_init can race
+// an old instance's still-running capture loop.
+static GMutex video_sink_lock;
+
 // Video
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
@@ -80,7 +87,14 @@ void rct_gst_set_uri(gchar* _uri)
     g_free(last_applied_uri);
     last_applied_uri = g_strdup(_uri);
 
-    rct_gst_get_configuration()->uri = _uri;
+    // Own the string: callers pass transient buffers (JNI GetStringUTFChars,
+    // -[NSString UTF8String]) that are released as soon as they return, so
+    // storing the caller's pointer would leave configuration->uri dangling.
+    RctGstConfiguration *cfg = rct_gst_get_configuration();
+    gchar *previous_uri = cfg->uri;
+    cfg->uri = g_strdup(_uri);
+    g_free(previous_uri);
+
     if (pipeline)
         apply_uri();
 }
@@ -112,7 +126,14 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
     
     if(pipeline)
     {
+        // gst_bin_get_by_name returns a NEW ref each call (this runs on every
+        // surface change), so drop the one we already hold before replacing it.
+        g_mutex_lock(&video_sink_lock);
+        GstElement *previous_sink = video_sink;
         video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
+        g_mutex_unlock(&video_sink_lock);
+        if (previous_sink)
+            gst_object_unref(previous_sink);
         
         // Configure the video sink if we have one
         if (video_sink) {
@@ -135,10 +156,11 @@ void rct_gst_set_drawable_surface(guintptr _drawableSurface)
 
 GstSample *rct_gst_pull_last_sample(void)
 {
-    if (!video_sink)
-        return NULL;
+    g_mutex_lock(&video_sink_lock);
     GstSample *sample = NULL;
-    g_object_get(video_sink, "last-sample", &sample, NULL);
+    if (video_sink)
+        g_object_get(video_sink, "last-sample", &sample, NULL);
+    g_mutex_unlock(&video_sink_lock);
     return sample;
 }
 
@@ -232,21 +254,194 @@ static gboolean cb_select_stream(GstElement *src, guint num, GstCaps *caps, gpoi
     return TRUE;
 }
 
+static GstPadProbeReturn
+strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    gsize size = gst_buffer_get_size(buffer);
+
+    if (size < 4)
+        return GST_PAD_PROBE_OK;
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
+        return GST_PAD_PROBE_OK;
+
+    /* RTSP server might send the full JPEG (SOI→EOI) as the RTP payload instead of
+     * RFC 2435 scan-data-only, so rtpjpegdepay prepends its own reconstructed
+     * header before the original JPEG, producing a buffer with two SOI markers.
+     * Find the second 0xFF 0xD8 and strip everything before it so jpegparse
+     * sees exactly one valid JPEG per buffer. */
+    gsize second_soi = (gsize)-1;
+    for (gsize i = 2; i + 1 < map.size; i++) {
+        if (map.data[i] == 0xFF && map.data[i + 1] == 0xD8) {
+            second_soi = i;
+            break;
+        }
+    }
+    gst_buffer_unmap(buffer, &map);
+
+    if (second_soi == (gsize)-1)
+        return GST_PAD_PROBE_OK;
+
+    GST_LOG_OBJECT(pad, "Stripping %zu-byte header prefix in rtpjpegdepay ", second_soi);
+
+    GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
+                                                  second_soi, size - second_soi);
+    if (!stripped)
+        return GST_PAD_PROBE_OK;
+    gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
+    gst_buffer_unref(stripped);
+
+    return GST_PAD_PROBE_OK;
+}
+
+static void rct_gst_dump_pipeline(GstBin *bin, gint depth);
+
+// Builds the depay/parse/decode chain matching whichever codec the camera
+// actually negotiated, then wires it between the jitterbuffer and the tee.
+// Deferred to here because the codec isn't known until RTSP SETUP completes
+// at runtime. `caps` must be the negotiated RTP caps (from the CAPS event,
+// not gst_pad_get_current_caps() — at pad-added time the pad may not have
+// its current caps set yet, even though the CAPS event carrying them is
+// about to be pushed).
+static void rct_gst_link_decode_chain(GstCaps *caps)
+{
+    GstElement *jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
+    GstElement *tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
+    if (!jitterbuffer || !tee) {
+        if (jitterbuffer) gst_object_unref(jitterbuffer);
+        if (tee) gst_object_unref(tee);
+        return;
+    }
+
+    GstPad *jb_src = gst_element_get_static_pad(jitterbuffer, "src");
+    gboolean already_built = gst_pad_is_linked(jb_src);
+    gst_object_unref(jb_src);
+    if (already_built) {
+        gst_object_unref(jitterbuffer);
+        gst_object_unref(tee);
+        return;
+    }
+
+    const GstStructure *s = caps ? gst_caps_get_structure(caps, 0) : NULL;
+    const gchar *encoding = s ? gst_structure_get_string(s, "encoding-name") : NULL;
+    gint payload = -1;
+    if (s) gst_structure_get_int(s, "payload", &payload);
+
+    // RFC 3551 assigns PT 26 to JPEG statically, so a server sending it may
+    // legally omit the a=rtpmap line that would otherwise set encoding-name.
+    gboolean is_jpeg = (encoding && g_ascii_strcasecmp(encoding, "JPEG") == 0) ||
+                        (!encoding && payload == 26);
+    gboolean is_h264 = encoding && g_ascii_strcasecmp(encoding, "H264") == 0;
+
+    gchar *decoder;
+    gchar *chain_desc;
+    if (is_jpeg) {
+        decoder = rct_gst_find_jpeg_decoder();
+        chain_desc = g_strdup_printf("rtpjpegdepay name=rtpjpegdepay0 ! jpegparse ! %s", decoder);
+    } else if (is_h264) {
+        decoder = rct_gst_find_h264_decoder();
+        chain_desc = g_strdup_printf("rtph264depay ! h264parse ! %s", decoder);
+    } else {
+        gchar *caps_str = caps ? gst_caps_to_string(caps) : NULL;
+        GST_ELEMENT_ERROR(pipeline, STREAM, CODEC_NOT_FOUND,
+                           ("Unsupported RTSP video encoding"),
+                           ("encoding-name=%s, caps=%s",
+                            encoding ? encoding : "unknown",
+                            caps_str ? caps_str : "none"));
+        g_free(caps_str);
+        gst_object_unref(jitterbuffer);
+        gst_object_unref(tee);
+        return;
+    }
+    g_free(decoder);
+
+    GError *error = NULL;
+    GstElement *chain = gst_parse_bin_from_description(chain_desc, TRUE, &error);
+    g_print("Decode chain: %s\n", chain_desc);
+    g_free(chain_desc);
+    if (error != NULL) {
+        g_printerr("Failed to build decode chain: %s\n", error->message);
+        g_error_free(error);
+        gst_object_unref(jitterbuffer);
+        gst_object_unref(tee);
+        return;
+    }
+
+    gst_bin_add(GST_BIN(pipeline), chain);
+
+    if (is_jpeg) {
+        GstElement *depay_elem = gst_bin_get_by_name(GST_BIN(chain), "rtpjpegdepay0");
+        if (depay_elem) {
+            GstPad *depay_src = gst_element_get_static_pad(depay_elem, "src");
+            gst_pad_add_probe(depay_src, GST_PAD_PROBE_TYPE_BUFFER, strip_rtpjpeg_header, NULL, NULL);
+            gst_object_unref(depay_src);
+            gst_object_unref(depay_elem);
+        }
+    }
+
+    GstPad *chain_sink = gst_element_get_static_pad(chain, "sink");
+    jb_src = gst_element_get_static_pad(jitterbuffer, "src");
+    if (GST_PAD_LINK_FAILED(gst_pad_link(jb_src, chain_sink)))
+        g_printerr("Failed to link rtpjitterbuffer -> decode chain\n");
+    gst_object_unref(chain_sink);
+    gst_object_unref(jb_src);
+
+    GstPad *chain_src = gst_element_get_static_pad(chain, "src");
+    GstPad *tee_sink = gst_element_get_static_pad(tee, "sink");
+    if (GST_PAD_LINK_FAILED(gst_pad_link(chain_src, tee_sink)))
+        g_printerr("Failed to link decode chain -> tee\n");
+    gst_object_unref(chain_src);
+    gst_object_unref(tee_sink);
+
+    gst_element_sync_state_with_parent(chain);
+
+    gst_object_unref(jitterbuffer);
+    gst_object_unref(tee);
+
+    // The pipeline may already be PLAYING by the time this dynamic chain is
+    // wired in (RTSP negotiation completes asynchronously), so the state-
+    // changed-driven dump in cb_state_changed can miss it entirely. Dump here
+    // too so the printed layout always reflects the codec actually in use.
+    rct_gst_dump_pipeline(GST_BIN(pipeline), 0);
+}
+
+// Catches the CAPS event on rtspsrc's dynamic pad — the authoritative point
+// at which the negotiated encoding (JPEG/H264) is known — and builds the
+// decode chain from it.
+static GstPadProbeReturn cb_rtsp_pad_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    (void)pad; (void)user_data;
+    GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
+    if (GST_EVENT_TYPE(event) != GST_EVENT_CAPS)
+        return GST_PAD_PROBE_OK;
+
+    GstCaps *caps;
+    gst_event_parse_caps(event, &caps);
+    rct_gst_link_decode_chain(caps);
+
+    return GST_PAD_PROBE_REMOVE;
+}
+
 // Enforces link between sink and src (bug on iOS)
 static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_data)
 {
     (void)src; (void)user_data;
-    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
-    if (!depay)
+    GstElement *jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
+    if (!jitterbuffer)
         return;
-    GstPad *sinkpad = gst_element_get_static_pad(depay, "sink");
+    GstPad *sinkpad = gst_element_get_static_pad(jitterbuffer, "sink");
     if (!gst_pad_is_linked(sinkpad)) {
         GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
         if (GST_PAD_LINK_FAILED(ret))
-            g_printerr("pad-added: rtspsrc -> rtpjpegdepay link failed (%d)\n", ret);
+            g_printerr("pad-added: rtspsrc -> rtpjitterbuffer link failed (%d)\n", ret);
     }
     gst_object_unref(sinkpad);
-    gst_object_unref(depay);
+    gst_object_unref(jitterbuffer);
+
+    gst_pad_add_probe(new_pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
+                       cb_rtsp_pad_caps_probe, NULL, NULL);
 }
 
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
@@ -436,6 +631,11 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
 
+    if (!pipeline) {
+        g_printerr("Pipeline state change ignored : no pipeline\n");
+        return GST_STATE_CHANGE_FAILURE;
+    }
+
     if (rct_gst_is_recording() && pipeline && state < GST_STATE_PLAYING) {
         g_print("Recording active - deferring state change until finalized\n");
         rct_gst_recorder_defer_state(state);
@@ -448,46 +648,54 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     return validity;
 }
 
-static GstPadProbeReturn
-strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+// Destroy the pipeline and everything hanging off it. Ordering matters: nothing
+// may still be able to reach the pipeline once its last ref is dropped.
+//
+//   1. consumer branches (they hold request pads on the pipeline's tees),
+//   2. the bus watch AND the bus sync handler - the sync handler runs on a
+//      streaming thread and reads video_overlay / drawable_surface, and the watch
+//      dereferences `pipeline` from the GMainLoop thread, which is NOT the thread
+//      calling this on either platform,
+//   3. the state change to NULL, which joins the streaming threads,
+//   4. the last ref.
+//
+// Safe to call with no pipeline, and safe to call twice.
+static void destroy_pipeline(void)
 {
-    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-    gsize size = gst_buffer_get_size(buffer);
+    rct_gst_recorder_reset();
+    rct_gst_event_recorder_reset();
+    rct_gst_encoder_reset();
 
-    if (size < 4)
-        return GST_PAD_PROBE_OK;
-
-    GstMapInfo map;
-    if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
-        return GST_PAD_PROBE_OK;
-
-    /* RTSP server might send the full JPEG (SOI→EOI) as the RTP payload instead of
-     * RFC 2435 scan-data-only, so rtpjpegdepay prepends its own reconstructed
-     * header before the original JPEG, producing a buffer with two SOI markers.
-     * Find the second 0xFF 0xD8 and strip everything before it so jpegparse
-     * sees exactly one valid JPEG per buffer. */
-    gsize second_soi = (gsize)-1;
-    for (gsize i = 2; i + 1 < map.size; i++) {
-        if (map.data[i] == 0xFF && map.data[i + 1] == 0xD8) {
-            second_soi = i;
-            break;
-        }
+    if (bus_watch_id) {
+        g_source_remove(bus_watch_id);
+        bus_watch_id = 0;
     }
-    gst_buffer_unmap(buffer, &map);
 
-    if (second_soi == (gsize)-1)
-        return GST_PAD_PROBE_OK;
+    if (pipeline) {
+        GstBus *pipeline_bus = gst_element_get_bus(pipeline);
+        if (pipeline_bus) {
+            gst_bus_set_sync_handler(pipeline_bus, NULL, NULL, NULL);
+            gst_object_unref(pipeline_bus);
+        }
 
-    GST_LOG_OBJECT(pad, "Stripping %zu-byte header prefix in rtpjpegdepay ", second_soi);
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        pipeline = NULL;
+    }
+    bus = NULL;   // unreffed in rct_gst_init; never dereference it again
 
-    GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
-                                                  second_soi, size - second_soi);
-    if (!stripped)
-        return GST_PAD_PROBE_OK;
-    gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
-    gst_buffer_unref(stripped);
+    // video_overlay is a cast of video_sink, NOT a second ref - clearing the
+    // pointer is the whole job. Unreffing it too would over-unref the sink.
+    g_mutex_lock(&video_sink_lock);
+    GstElement *sink = video_sink;
+    video_sink = NULL;
+    g_mutex_unlock(&video_sink_lock);
+    if (sink)
+        gst_object_unref(sink);
 
-    return GST_PAD_PROBE_OK;
+    video_overlay = NULL;
+    video_tee = NULL;
+    audio_level_element = NULL;   // owned by the bin from create_audio_sink()
 }
 
 void rct_gst_init(RctGstConfiguration *configuration)
@@ -495,24 +703,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
     gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
     gchar *launch_command_app;
 
-    rct_gst_recorder_reset();
-    rct_gst_event_recorder_reset();
-    rct_gst_encoder_reset();
-    if (pipeline) {
-        gst_element_set_state(pipeline, GST_STATE_NULL);
-        if (bus_watch_id) {
-            g_source_remove(bus_watch_id);
-            bus_watch_id = 0;
-        }
-        gst_object_unref(pipeline);
-        pipeline = NULL;
-    }
-    if (video_sink) {
-        gst_object_unref(video_sink);
-        video_sink = NULL;
-    }
-    video_overlay = NULL;
-    video_tee = NULL;
+    destroy_pipeline();
 
 #if defined(__APPLE__)
     const gchar *render_tail =
@@ -522,17 +713,18 @@ void rct_gst_init(RctGstConfiguration *configuration)
     const gchar *render_tail =
         "autovideoconvert ! glimagesink sync=false name=video-sink";
 #endif
-    gchar *selected_decoder = rct_gst_find_jpeg_decoder();
+    // The depay/parse/decode chain depends on the codec the camera actually
+    // negotiates (JPEG or H264), which isn't known until RTSP SETUP completes,
+    // so it's built dynamically in rct_gst_link_decode_chain() once rtspsrc's
+    // pad appears. Only the codec-agnostic tail is static here.
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
-        "! rtpjpegdepay name=rtpjpegdepay0 "
-        "! jpegparse "
-        "! %s "
-        "! tee name=video-tee "
+        "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
+        "tee name=video-tee "
         "! queue "
         "! %s";
-    launch_command_app = g_strdup_printf(pipeline_template, selected_decoder, render_tail);
-    g_free(selected_decoder);
+    launch_command_app = g_strdup_printf(pipeline_template, render_tail);
+    g_print("Launch command: %s\n", launch_command_app);
 
     // Prepare pipeline. If not working, will display an error video signal
     gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
@@ -541,17 +733,14 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (error != NULL) {
         g_printerr("Error creating pipeline: %s\n", error->message);
         g_error_free(error);
+        // A failed parse can still hand back a partial pipeline; don't keep it,
+        // every other entry point treats a non-NULL pipeline as usable.
+        if (pipeline) {
+            gst_object_unref(pipeline);
+            pipeline = NULL;
+        }
+        g_free(launch_command_app);
         return;
-    }
-
-    /* Strip the rtpjpegdepay-prepended reconstructed header before jpegparse
-     * sees the buffer, so it receives exactly one valid JPEG per frame. */
-    GstElement *depay_elem = gst_bin_get_by_name(GST_BIN(pipeline), "rtpjpegdepay0");
-    if (depay_elem) {
-        GstPad *src_pad = gst_element_get_static_pad(depay_elem, "src");
-        gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, strip_rtpjpeg_header, NULL, NULL);
-        gst_object_unref(src_pad);
-        gst_object_unref(depay_elem);
     }
 
     GstElement *tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
@@ -587,46 +776,73 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();
     }
+
+    g_free(launch_command_app);
 }
 
 void rct_gst_run_loop()
 {
-    main_loop = g_main_loop_new(NULL, FALSE);
-    g_main_loop_run(main_loop);
+    GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+    main_loop = loop;
+
+    g_main_loop_run(loop);
+
+    // The loop's ref belongs here, to the function that created it:
+    // rct_gst_terminate() only quits it. g_main_loop_run holds its own ref while
+    // running, so this is the unref that actually frees it - and it happens on
+    // the loop thread, after the loop has stopped.
+    if (main_loop == loop)
+        main_loop = NULL;
+    g_main_loop_unref(loop);
 }
 
 void rct_gst_terminate()
 {
-    /* Free resources */
-    if(video_sink != NULL)
-        gst_object_unref(video_sink);
-    
-    if(video_overlay != NULL)
-        gst_object_unref(video_overlay);
-    
-    if(drawable_surface)
-        drawable_surface = 0;
+    // Tear the pipeline down first: this cancels the bus watch and every timer,
+    // probe and branch that could still call back into the state freed below.
+    destroy_pipeline();
 
-    rct_gst_recorder_reset();
-    rct_gst_event_recorder_reset();
-    rct_gst_encoder_reset();
+    drawable_surface = 0;
 
-    rct_gst_set_pipeline_state(GST_STATE_NULL);
-    gst_object_unref(pipeline);
-    
-    g_source_remove(bus_watch_id);
-    g_main_loop_unref(main_loop);
-    
-    g_free(configuration->audioLevelRefreshRate);
-    g_free(configuration);
-    g_free(audio_level);
-    
-    pipeline = NULL;
-    configuration = NULL;
-    audio_level = NULL;
-    video_sink = NULL;
-    video_overlay = NULL;
-    video_tee = NULL;
+    // Stop the GMainLoop. It is running on another thread (a pthread on Android,
+    // a dispatch queue on iOS), so it owns its own ref and unrefs it in
+    // rct_gst_run_loop once g_main_loop_run returns. Callers that need the
+    // thread to be gone before they release the surface must join it.
+    if (main_loop)
+        g_main_loop_quit(main_loop);
+
+    // `configuration` and `audio_level` are deliberately NOT freed. Both are lazy
+    // process-lifetime singletons, and the bus watch reads them from the GMainLoop
+    // thread: g_source_remove (in destroy_pipeline) unregisters the watch but does
+    // NOT wait for a dispatch that is already running to return, so freeing them
+    // here can race a live cb_state_changed / cb_message_element. Resetting them
+    // instead costs one fixed allocation for the life of the process and removes
+    // the use-after-free entirely - and the next rct_gst_init repopulates both.
+    if (configuration) {
+        g_free(configuration->uri);
+        configuration->uri = NULL;
+
+        configuration->isDebugging = FALSE;
+        configuration->initialDrawableSurface = 0;
+        if (configuration->audioLevelRefreshRate)
+            *(configuration->audioLevelRefreshRate) = 100;
+
+        configuration->onInit = NULL;
+        configuration->onStateChanged = NULL;
+        configuration->onVolumeChanged = NULL;
+        configuration->onUriChanged = NULL;
+        configuration->onEOS = NULL;
+        configuration->onElementError = NULL;
+        configuration->onRecordingFinished = NULL;
+        configuration->onEventSaved = NULL;
+    }
+
+    if (audio_level) {
+        audio_level->rms = 0;
+        audio_level->peak = 0;
+        audio_level->decay = 0;
+    }
+
     g_free(last_applied_uri);
     last_applied_uri = NULL;
 }
