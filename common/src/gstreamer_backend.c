@@ -122,6 +122,16 @@ void rct_gst_set_debugging(gboolean is_debugging)
  *********************/
 void rct_gst_set_drawable_surface(guintptr _drawableSurface)
 {
+    // Unlike the GL window, vulkansink's Android window refuses to be repointed
+    // at a different native window once it holds one ("View changes are not
+    // implemented"), so a surface that is destroyed and recreated - the app
+    // going to background, a rotation - only renders again once the pipeline
+    // itself is re-created. Log it, otherwise the symptom is a silent black view.
+    if (pipeline && drawable_surface && _drawableSurface != drawable_surface) {
+        g_printerr("Drawable surface changed under the vulkan sink; "
+                   "re-create the pipeline to render into the new one\n");
+    }
+
     drawable_surface = _drawableSurface;
     
     if(pipeline)
@@ -700,34 +710,26 @@ static void destroy_pipeline(void)
 
 void rct_gst_init(RctGstConfiguration *configuration)
 {
-    gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
-    gchar *launch_command_app;
+    const gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
 
     destroy_pipeline();
 
-#if defined(__APPLE__)
-    const gchar *render_tail =
-        "vulkanupload ! vulkancolorconvert "
-        "! vulkansink name=video-sink enable-last-sample=true";
-#else
-    const gchar *render_tail =
-        "autovideoconvert ! glimagesink sync=false name=video-sink";
-#endif
     // The depay/parse/decode chain depends on the codec the camera actually
     // negotiates (JPEG or H264), which isn't known until RTSP SETUP completes,
     // so it's built dynamically in rct_gst_link_decode_chain() once rtspsrc's
     // pad appears. Only the codec-agnostic tail is static here.
-    gchar *pipeline_template =
+    const gchar *launch_command_app =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
         "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
         "tee name=video-tee "
         "! queue "
-        "! %s";
-    launch_command_app = g_strdup_printf(pipeline_template, render_tail);
+        "! videoconvert ! video/x-raw,format=NV12 "
+        "! vulkanupload ! vulkancolorconvert "
+        "! vulkansink sync=false name=video-sink enable-last-sample=true";
     g_print("Launch command: %s\n", launch_command_app);
 
     // Prepare pipeline. If not working, will display an error video signal
-    gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
+    const gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
     GError *error = NULL;
     pipeline = gst_parse_launch(launch_command, &error);
     if (error != NULL) {
@@ -739,7 +741,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
             gst_object_unref(pipeline);
             pipeline = NULL;
         }
-        g_free(launch_command_app);
         return;
     }
 
@@ -776,8 +777,6 @@ void rct_gst_init(RctGstConfiguration *configuration)
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();
     }
-
-    g_free(launch_command_app);
 }
 
 void rct_gst_run_loop()
