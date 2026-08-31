@@ -51,7 +51,7 @@ RCT_EXPORT_VIEW_PROPERTY(onEventSaved, RCTBubblingEventBlock)
 // Methods
 RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber *)state) {
     NSNumber *_state = [RCTConvert NSNumber:state];
-    rct_gst_set_pipeline_state([_state intValue]);
+    [RCTGstPlayerController enqueuePipelineState:(GstState)[_state intValue]];
 }
 
 RCT_EXPORT_METHOD(recreateView:(nonnull NSNumber *)reactTag){

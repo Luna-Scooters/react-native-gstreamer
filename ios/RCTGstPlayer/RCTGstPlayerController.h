@@ -16,6 +16,9 @@
 }
 - (void) recreateView;
 - (void) stopImageCapture;
+
+// Queues a pipeline state change on the shared serial pipeline queue and returns immediately.
++ (void) enqueuePipelineState:(GstState)state;
 - (void) setCaptureFrames:(BOOL)enable;
 - (RctGstConfiguration *) getConfiguration;
 @end

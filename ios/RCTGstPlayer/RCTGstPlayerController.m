@@ -43,6 +43,20 @@ NSNumber* newState;
 
 dispatch_queue_t background_queue = NULL;
 dispatch_queue_t events_queue;
+static dispatch_queue_t pipeline_state_queue = NULL;
+
++ (void)initialize
+{
+    if (self == [RCTGstPlayerController class])
+        pipeline_state_queue = dispatch_queue_create("RctGstPipelineStateQueue", 0);
+}
+
++ (void)enqueuePipelineState:(GstState)state
+{
+    dispatch_async(pipeline_state_queue, ^{
+        rct_gst_set_pipeline_state(state);
+    });
+}
 
 // Generate custom view to return to react-native (for events handle)
 @dynamic view;
@@ -117,7 +131,7 @@ dispatch_queue_t events_queue;
 {
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
-            rct_gst_set_pipeline_state(GST_STATE_PLAYING);
+            [RCTGstPlayerController enqueuePipelineState:GST_STATE_PLAYING];
             [self startImageCaptureThread];
         });
 }
@@ -478,8 +492,12 @@ void onEventSaved(gchar *file_path) {
     [super viewWillDisappear:animated];
     [self stopImageCapture];
 
-    rct_gst_set_pipeline_state(GST_STATE_NULL);
-    [self removeGstSubviews];
+    dispatch_async(pipeline_state_queue, ^{
+        rct_gst_set_pipeline_state(GST_STATE_NULL);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self removeGstSubviews];
+        });
+    });
 }
 
 - (void)removeGstSubviews
