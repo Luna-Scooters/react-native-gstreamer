@@ -1,5 +1,5 @@
 import React from 'react'
-import { requireNativeComponent, UIManager, findNodeHandle, AppState, Platform } from 'react-native'
+import { requireNativeComponent, UIManager, findNodeHandle, AppState } from 'react-native'
 
 const PropTypes = require('prop-types')
 
@@ -35,19 +35,7 @@ export default class GstPlayer extends React.Component {
             this.stopImageCapture()
         }
         else if (this.appState.match(/inactive|background/)) {
-
-            // On iOS we need to recreate video sink to bypass a bug with vtdec when video freezes
-            if (Platform.OS === 'ios') {
-                this.recreateView()
-            }
             this.play()
-        } else {
-            if (Platform.OS === 'ios') {
-                this.pause()
-            }
-            else {
-                this.stop()
-            }
         }
         this.appState = nextAppState
     }
@@ -64,13 +52,6 @@ export default class GstPlayer extends React.Component {
         const { old_state, new_state } = _message.nativeEvent
         console.log(_message.nativeEvent)
         this.currentGstState = new_state
-
-        if (old_state === GstState.PAUSED && new_state === GstState.READY) {
-
-            // On iOS we need to recreate video sink to bypass a bug with vtdec when video freezes
-            if (Platform.OS === 'ios')
-                this.recreateView()
-        }
 
         if (this.props.onStateChanged)
             this.props.onStateChanged(old_state, new_state)
@@ -175,15 +156,6 @@ export default class GstPlayer extends React.Component {
         )
     }
 
-    // Helper methods
-    recreateView() {
-        UIManager.dispatchViewManagerCommand(
-            this.playerHandle,
-            UIManager.RCTGstPlayer.Commands.recreateView,
-            []
-        )
-    }
-
     render() {
         return (
             <RCTGstPlayer
@@ -241,8 +213,7 @@ GstPlayer.propTypes = {
 
     // Helper methods
     createDrawableSurface: PropTypes.func,
-    destroyDrawableSurface: PropTypes.func,
-    recreateView: PropTypes.func
+    destroyDrawableSurface: PropTypes.func
 }
 
 const RCTGstPlayer = requireNativeComponent('RCTGstPlayer')

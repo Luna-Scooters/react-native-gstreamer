@@ -54,10 +54,6 @@ RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber 
     [RCTGstPlayerController enqueuePipelineState:(GstState)[_state intValue]];
 }
 
-RCT_EXPORT_METHOD(recreateView:(nonnull NSNumber *)reactTag){
-    [self->playerController recreateView];
-}
-
 RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
     [self->playerController stopImageCapture];
 }

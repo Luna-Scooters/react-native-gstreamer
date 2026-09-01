@@ -126,7 +126,7 @@ static dispatch_queue_t pipeline_state_queue = NULL;
     }
 }
 
-// Set the pipeline to playing
+// Resumes playback
 - (void) recreateView
 {
     if (events_queue != NULL)
@@ -283,7 +283,7 @@ void onStateChanged(GstState old_state, GstState new_state) {
                 NSLog(@"currentInstance or _view is nil, skipping state change event");
                 return;
             }
-            NSLog(@"mydebug : new_state -> %s (%d -> %d)", gst_element_state_get_name(new_state), oldState, newState);
+            NSLog(@"mydebug : new_state -> %s (%@ -> %@)", gst_element_state_get_name(new_state), oldState, newState);
             currentInstance->_view.onStateChanged(@{ @"old_state": oldState, @"new_state": newState });
         });
 }
