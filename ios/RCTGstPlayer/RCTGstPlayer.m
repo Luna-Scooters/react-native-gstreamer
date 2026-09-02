@@ -19,8 +19,12 @@ RCT_CUSTOM_VIEW_PROPERTY(uri, NSString, RCTGstPlayerController)
 {
     NSString *uri = [RCTConvert NSString:json];
     NSLog(@"RCTGstPlayer : URI : %s - LENGTH : %lu", [uri UTF8String], (unsigned long)uri.length);
-    if (uri.length > 0)
-        rct_gst_set_uri((gchar *)[uri UTF8String]);
+    if (uri.length > 0) {
+        NSString *queuedUri = [uri copy];
+        [RCTGstPlayerController enqueuePipelineWork:^{
+            rct_gst_set_uri((gchar *)[queuedUri UTF8String]);
+        }];
+    }
 }
 RCT_CUSTOM_VIEW_PROPERTY(audioLevelRefreshRate, NSNumber, RCTGstPlayerController)
 {
