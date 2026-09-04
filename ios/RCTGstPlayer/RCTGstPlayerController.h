@@ -14,7 +14,10 @@
 @interface RCTGstPlayerController : UIViewController {
     RctGstParentView *_view;
 }
-- (void) recreateView;
+// Tears the player down: stops capture, destroys the drawable surface and
+// terminates the backend
+- (void) terminate;
+
 - (void) stopImageCapture;
 
 // Queues a pipeline state change on the shared serial pipeline queue and returns immediately.

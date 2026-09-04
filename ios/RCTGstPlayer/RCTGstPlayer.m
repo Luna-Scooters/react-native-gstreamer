@@ -84,16 +84,21 @@ RCT_EXPORT_METHOD(saveEvent:(nonnull NSNumber *)reactTag
 // react-native init
 - (UIView *)view
 {
+    // Init GStreamer once per process.
+    static dispatch_once_t gstOnce;
+    dispatch_once(&gstOnce, ^{
+        gst_ios_init();
+    });
+
+    // unmount hook that React Native does not reliably deliver for this view.
     if (self->playerController != nil) {
-        [self->playerController recreateView];
-        return [self->playerController view];
+        [self->playerController terminate];
+        self->playerController = nil;
     }
-    // Init GStreamer
-    gst_ios_init();
     
     // Init controller
     self->playerController = [[RCTGstPlayerController alloc] init];
-    
+
     // Return view
     return [self->playerController view];
 }
