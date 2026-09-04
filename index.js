@@ -14,6 +14,7 @@ export const GstState = {
 export default class GstPlayer extends React.Component {
 
     currentGstState = undefined
+    lastRequestedState = undefined
     appState = "active"
     isInitialized = false
 
@@ -27,14 +28,15 @@ export default class GstPlayer extends React.Component {
     componentWillUnmount() {
         if (this.appStateSubscription) {
             this.appStateSubscription.remove();
+            this.appStateSubscription = null
         }
     }
 
     appStateChanged = (nextAppState) => {
         if (nextAppState !== 'active') {
             this.stopImageCapture()
-        }
-        else if (this.appState.match(/inactive|background/)) {
+        } 
+        else if (this.appState.match(/inactive|background/) && this.lastRequestedState === GstState.PLAYING) {
             this.play()
         }
         this.appState = nextAppState
@@ -104,6 +106,8 @@ export default class GstPlayer extends React.Component {
 
     // Methods
     setGstState(state) {
+        this.lastRequestedState = state
+
         UIManager.dispatchViewManagerCommand(
             this.playerHandle,
             UIManager.RCTGstPlayer.Commands.setState,

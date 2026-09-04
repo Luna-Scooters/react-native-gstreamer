@@ -26,7 +26,11 @@
     long captureFps;
     long capturePeriodMs;
     UIGraphicsImageRenderer *imageRenderer;
+
+    _Atomic(NSUInteger) teardownGeneration;
 }
+
+- (void)performTeardown;
 
 @end
 
@@ -493,6 +497,22 @@ void onEventSaved(gchar *file_path) {
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
+
+    NSUInteger generation = atomic_fetch_add(&teardownGeneration, 1) + 1;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != atomic_load(&self->teardownGeneration))
+            return;                          // superseded by a later transition
+        if (self->_view.window != nil)
+            return;                          // bounced back; never really left
+
+        [self performTeardown];
+    });
+}
+
+// The former body of -viewWillDisappear, unchanged apart from now being gated.
+- (void)performTeardown
+{
     [self stopImageCapture];
 
     NSArray<UIView *> *orphans = [self->drawableSurface.subviews copy];
