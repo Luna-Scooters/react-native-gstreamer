@@ -133,17 +133,6 @@ static dispatch_queue_t pipeline_state_queue = NULL;
     }
 }
 
-// Resumes playback
-- (void) recreateView
-{
-    if (events_queue != NULL)
-        dispatch_async(events_queue, ^{
-            [RCTGstPlayerController enqueuePipelineState:GST_STATE_PLAYING];
-            [self startImageCaptureThread];
-        });
-}
-
-
 // Cached Metal objects for the GPU->CPU readback blit.
 static id<MTLCommandQueue> s_blitQueue = nil;
 static id<MTLBuffer> s_blitBuffer = nil;
@@ -417,7 +406,7 @@ void onEventSaved(gchar *file_path) {
 }
 
 // Memory management
-- (void)dealloc
+- (void)terminate
 {
     [self stopImageCapture];
 
@@ -437,6 +426,11 @@ void onEventSaved(gchar *file_path) {
         debug_info = NULL;
         [self destroyDrawableSurface];
     }
+}
+
+- (void)dealloc
+{
+    [self terminate];
 }
 
 - (void)startImageCaptureThread {
@@ -513,6 +507,9 @@ void onEventSaved(gchar *file_path) {
 // The former body of -viewWillDisappear, unchanged apart from now being gated.
 - (void)performTeardown
 {
+    if (currentInstance != self)
+        return;
+
     [self stopImageCapture];
 
     NSArray<UIView *> *orphans = [self->drawableSurface.subviews copy];
