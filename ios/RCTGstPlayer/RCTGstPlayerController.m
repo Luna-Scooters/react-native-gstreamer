@@ -26,7 +26,11 @@
     long captureFps;
     long capturePeriodMs;
     UIGraphicsImageRenderer *imageRenderer;
+
+    _Atomic(NSUInteger) teardownGeneration;
 }
+
+- (void)performTeardown;
 
 @end
 
@@ -38,11 +42,28 @@ static RCTGstPlayerController *currentInstance = nil;
 gchar *new_uri;
 gchar *source, *message, *debug_info;
 
-NSNumber* oldState;
-NSNumber* newState;
-
 dispatch_queue_t background_queue = NULL;
 dispatch_queue_t events_queue;
+static dispatch_queue_t pipeline_state_queue = NULL;
+
++ (void)initialize
+{
+    if (self == [RCTGstPlayerController class])
+        pipeline_state_queue = dispatch_queue_create("RctGstPipelineStateQueue", 0);
+}
+
++ (void)enqueuePipelineState:(GstState)state
+{
+    dispatch_async(pipeline_state_queue, ^{
+        rct_gst_set_pipeline_state(state);
+    });
+}
+
++ (void)enqueuePipelineWork:(dispatch_block_t)work
+{
+    if (work)
+        dispatch_async(pipeline_state_queue, work);
+}
 
 // Generate custom view to return to react-native (for events handle)
 @dynamic view;
@@ -111,17 +132,6 @@ dispatch_queue_t events_queue;
         self->drawableSurface = nil;
     }
 }
-
-// Set the pipeline to playing
-- (void) recreateView
-{
-    if (events_queue != NULL)
-        dispatch_async(events_queue, ^{
-            rct_gst_set_pipeline_state(GST_STATE_PLAYING);
-            [self startImageCaptureThread];
-        });
-}
-
 
 // Cached Metal objects for the GPU->CPU readback blit.
 static id<MTLCommandQueue> s_blitQueue = nil;
@@ -260,17 +270,17 @@ void onInit() {
 
 void onStateChanged(GstState old_state, GstState new_state) {
     
-    oldState = [NSNumber numberWithInt:old_state];
-    newState = [NSNumber numberWithInt:new_state];
-    
+    NSNumber *oldStateNumber = @(old_state);
+    NSNumber *newStateNumber = @(new_state);
+
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
             if (currentInstance == nil || currentInstance->_view == nil) {
                 NSLog(@"currentInstance or _view is nil, skipping state change event");
                 return;
             }
-            NSLog(@"mydebug : new_state -> %s (%d -> %d)", gst_element_state_get_name(new_state), oldState, newState);
-            currentInstance->_view.onStateChanged(@{ @"old_state": oldState, @"new_state": newState });
+            NSLog(@"mydebug : new_state -> %s (%@ -> %@)", gst_element_state_get_name(new_state), oldStateNumber, newStateNumber);
+            currentInstance->_view.onStateChanged(@{ @"old_state": oldStateNumber, @"new_state": newStateNumber });
         });
 }
 
@@ -396,7 +406,7 @@ void onEventSaved(gchar *file_path) {
 }
 
 // Memory management
-- (void)dealloc
+- (void)terminate
 {
     [self stopImageCapture];
 
@@ -416,6 +426,11 @@ void onEventSaved(gchar *file_path) {
         debug_info = NULL;
         [self destroyDrawableSurface];
     }
+}
+
+- (void)dealloc
+{
+    [self terminate];
 }
 
 - (void)startImageCaptureThread {
@@ -476,25 +491,48 @@ void onEventSaved(gchar *file_path) {
 - (void)viewWillDisappear:(BOOL)animated
 {
     [super viewWillDisappear:animated];
-    [self stopImageCapture];
 
-    rct_gst_set_pipeline_state(GST_STATE_NULL);
-    [self removeGstSubviews];
+    NSUInteger generation = atomic_fetch_add(&teardownGeneration, 1) + 1;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (generation != atomic_load(&self->teardownGeneration))
+            return;                          // superseded by a later transition
+        if (self->_view.window != nil)
+            return;                          // bounced back; never really left
+
+        [self performTeardown];
+    });
 }
 
-- (void)removeGstSubviews
+// The former body of -viewWillDisappear, unchanged apart from now being gated.
+- (void)performTeardown
 {
-    if (!self->drawableSurface)
+    if (currentInstance != self)
+        return;
+
+    [self stopImageCapture];
+
+    NSArray<UIView *> *orphans = [self->drawableSurface.subviews copy];
+
+    [RCTGstPlayerController enqueuePipelineWork:^{
+        rct_gst_set_pipeline_state(GST_STATE_NULL);
+        [self removeGstSubviews:orphans];
+    }];
+}
+
+- (void)removeGstSubviews:(NSArray<UIView *> *)views
+{
+    if (views.count == 0)
         return;
     void (^sweep)(void) = ^{
-        for (UIView *sub in [self->drawableSurface.subviews copy]) {
+        for (UIView *sub in views) {
             [sub removeFromSuperview];
         }
     };
     if ([NSThread isMainThread]) {
         sweep();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), sweep);
+        dispatch_async(dispatch_get_main_queue(), sweep);
     }
 }
 

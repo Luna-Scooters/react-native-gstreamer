@@ -31,6 +31,8 @@ GstBus *bus;
 // an old instance's still-running capture loop.
 static GMutex video_sink_lock;
 
+static GMutex pipeline_lock;
+
 // Video
 guintptr drawable_surface;
 GstVideoOverlay* video_overlay;
@@ -627,24 +629,39 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
 /*************
  OTHER METHODS
  ************/
+
+// A strong ref to the current pipeline, or NULL. Anything not on the main thread
+// must come through here instead of touching the global, which destroy_pipeline()
+// can clear and unref underneath it.
+static GstElement *pipeline_ref(void)
+{
+    g_mutex_lock(&pipeline_lock);
+    GstElement *ref = pipeline ? gst_object_ref(pipeline) : NULL;
+    g_mutex_unlock(&pipeline_lock);
+    return ref;
+}
+
 GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
 
-    if (!pipeline) {
+    GstElement *target = pipeline_ref();
+    if (!target) {
         g_printerr("Pipeline state change ignored : no pipeline\n");
         return GST_STATE_CHANGE_FAILURE;
     }
 
-    if (rct_gst_is_recording() && pipeline && state < GST_STATE_PLAYING) {
+    if (rct_gst_is_recording() && state < GST_STATE_PLAYING) {
         g_print("Recording active - deferring state change until finalized\n");
         rct_gst_recorder_defer_state(state);
+        gst_object_unref(target);
         return GST_STATE_CHANGE_ASYNC;
     }
 
-    GstStateChangeReturn validity = gst_element_set_state(pipeline, state);
+    GstStateChangeReturn validity = gst_element_set_state(target, state);
     g_print("Validity : %s\n", gst_element_state_change_return_get_name(validity));
 
+    gst_object_unref(target);
     return validity;
 }
 
@@ -671,16 +688,20 @@ static void destroy_pipeline(void)
         bus_watch_id = 0;
     }
 
-    if (pipeline) {
-        GstBus *pipeline_bus = gst_element_get_bus(pipeline);
+    g_mutex_lock(&pipeline_lock);
+    GstElement *target = pipeline;
+    pipeline = NULL;
+    g_mutex_unlock(&pipeline_lock);
+
+    if (target) {
+        GstBus *pipeline_bus = gst_element_get_bus(target);
         if (pipeline_bus) {
             gst_bus_set_sync_handler(pipeline_bus, NULL, NULL, NULL);
             gst_object_unref(pipeline_bus);
         }
 
-        gst_element_set_state(pipeline, GST_STATE_NULL);
-        gst_object_unref(pipeline);
-        pipeline = NULL;
+        gst_element_set_state(target, GST_STATE_NULL);
+        gst_object_unref(target);
     }
     bus = NULL;   // unreffed in rct_gst_init; never dereference it again
 
@@ -854,20 +875,26 @@ gchar *rct_gst_get_info()
 
 void apply_uri()
 {
+    const gchar *uri = rct_gst_get_configuration()->uri;
+    if (uri == NULL || *uri == '\0') {
+        g_print("URI not set yet - nothing to apply\n");
+        return;
+    }
+
     rct_gst_set_pipeline_state(GST_STATE_READY);
 
     // Check if this is a rtspsrc pipeline or playbin pipeline
     GstElement *src_element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
     if (src_element) {
         // This is the rtspsrc pipeline - set location on the rtspsrc element
-        g_object_set(src_element, "location", rct_gst_get_configuration()->uri, NULL);
+        g_object_set(src_element, "location", uri, NULL);
         gst_object_unref(src_element);
     } else {
         // This is the playbin pipeline - set uri on the pipeline
-        g_object_set(pipeline, "uri", rct_gst_get_configuration()->uri, NULL);
+        g_object_set(pipeline, "uri", uri, NULL);
     }
 
     if (rct_gst_get_configuration()->onUriChanged) {
-        rct_gst_get_configuration()->onUriChanged(rct_gst_get_configuration()->uri);
+        rct_gst_get_configuration()->onUriChanged((gchar *) uri);
     }
 }

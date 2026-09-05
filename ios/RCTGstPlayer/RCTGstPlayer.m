@@ -19,8 +19,12 @@ RCT_CUSTOM_VIEW_PROPERTY(uri, NSString, RCTGstPlayerController)
 {
     NSString *uri = [RCTConvert NSString:json];
     NSLog(@"RCTGstPlayer : URI : %s - LENGTH : %lu", [uri UTF8String], (unsigned long)uri.length);
-    if (uri.length > 0)
-        rct_gst_set_uri((gchar *)[uri UTF8String]);
+    if (uri.length > 0) {
+        NSString *queuedUri = [uri copy];
+        [RCTGstPlayerController enqueuePipelineWork:^{
+            rct_gst_set_uri((gchar *)[queuedUri UTF8String]);
+        }];
+    }
 }
 RCT_CUSTOM_VIEW_PROPERTY(audioLevelRefreshRate, NSNumber, RCTGstPlayerController)
 {
@@ -51,11 +55,7 @@ RCT_EXPORT_VIEW_PROPERTY(onEventSaved, RCTBubblingEventBlock)
 // Methods
 RCT_EXPORT_METHOD(setState:(nonnull NSNumber *)reactTag state:(nonnull NSNumber *)state) {
     NSNumber *_state = [RCTConvert NSNumber:state];
-    rct_gst_set_pipeline_state([_state intValue]);
-}
-
-RCT_EXPORT_METHOD(recreateView:(nonnull NSNumber *)reactTag){
-    [self->playerController recreateView];
+    [RCTGstPlayerController enqueuePipelineState:(GstState)[_state intValue]];
 }
 
 RCT_EXPORT_METHOD(stopImageCapture:(nonnull NSNumber *)reactTag){
@@ -84,16 +84,21 @@ RCT_EXPORT_METHOD(saveEvent:(nonnull NSNumber *)reactTag
 // react-native init
 - (UIView *)view
 {
+    // Init GStreamer once per process.
+    static dispatch_once_t gstOnce;
+    dispatch_once(&gstOnce, ^{
+        gst_ios_init();
+    });
+
+    // unmount hook that React Native does not reliably deliver for this view.
     if (self->playerController != nil) {
-        [self->playerController recreateView];
-        return [self->playerController view];
+        [self->playerController terminate];
+        self->playerController = nil;
     }
-    // Init GStreamer
-    gst_ios_init();
     
     // Init controller
     self->playerController = [[RCTGstPlayerController alloc] init];
-    
+
     // Return view
     return [self->playerController view];
 }
