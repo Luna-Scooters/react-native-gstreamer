@@ -25,7 +25,6 @@
     long lastCaptureTimeMs;
     long captureFps;
     long capturePeriodMs;
-    UIGraphicsImageRenderer *imageRenderer;
 
     _Atomic(NSUInteger) teardownGeneration;
 }
@@ -39,17 +38,17 @@
 // For access in pure C callbacks
 static RCTGstPlayerController *currentInstance = nil;
 
-gchar *new_uri;
-gchar *source, *message, *debug_info;
-
 dispatch_queue_t background_queue = NULL;
 dispatch_queue_t events_queue;
 static dispatch_queue_t pipeline_state_queue = NULL;
 
 + (void)initialize
 {
-    if (self == [RCTGstPlayerController class])
+    if (self == [RCTGstPlayerController class]) {
         pipeline_state_queue = dispatch_queue_create("RctGstPipelineStateQueue", 0);
+        background_queue = dispatch_queue_create("RctGstBackgroundQueue", 0);
+        events_queue = dispatch_get_main_queue();
+    }
 }
 
 + (void)enqueuePipelineState:(GstState)state
@@ -76,10 +75,6 @@ static dispatch_queue_t pipeline_state_queue = NULL;
 
 - (instancetype)init
 {
-    
-    background_queue = dispatch_queue_create("RctGstBackgroundQueue", 0);
-    events_queue = dispatch_get_main_queue();
-    
     self = [super init];
     if (self) {
         _view = [[RctGstParentView alloc] init];
@@ -89,15 +84,7 @@ static dispatch_queue_t pipeline_state_queue = NULL;
         [self stopImageCapture];
         captureFps = 15;
         capturePeriodMs = (1000 / captureFps);
-        lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);;
-
-        imageRenderer = nil;
-        
-        new_uri = g_malloc(sizeof(gchar));
-        
-        source = g_malloc(sizeof(gchar));
-        message = g_malloc(sizeof(gchar));
-        debug_info = g_malloc(sizeof(gchar));
+        lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);
     }
     return self;
 }
@@ -300,8 +287,7 @@ void onVolumeChanged(RctGstAudioLevel* audioLevel) {
 }
 
 void onUriChanged(gchar* newUri) {
-    g_free(new_uri);
-    new_uri = g_strdup(newUri);
+    NSString *uri = [NSString stringWithUTF8String:newUri];
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
             if (currentInstance == nil || currentInstance->_view == nil) {
@@ -309,7 +295,7 @@ void onUriChanged(gchar* newUri) {
                 return;
             }
         
-            currentInstance->_view.onUriChanged(@{ @"new_uri": [NSString stringWithUTF8String:new_uri] });
+            currentInstance->_view.onUriChanged(@{ @"new_uri": uri });
         });
 }
 
@@ -325,14 +311,11 @@ void onEOS() {
 }
 
 void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
-    g_free(source);
-    g_free(message);
-    g_free(debug_info);
-    source = g_strdup(_source);
-    message = g_strdup(_message);
-    debug_info = g_strdup(_debug_info);
-    
-    NSLog(@"onElementError: source: %s, message: %s, debug_info: %s", source, message, debug_info);
+    NSString *source = [NSString stringWithUTF8String:_source];
+    NSString *message = [NSString stringWithUTF8String:_message];
+    NSString *debug_info = [NSString stringWithUTF8String:_debug_info];
+
+    NSLog(@"onElementError: source: %@, message: %@, debug_info: %@", source, message, debug_info);
     if (events_queue != NULL)
         dispatch_async(events_queue, ^{
             if (currentInstance == nil || currentInstance->_view == nil) {
@@ -340,9 +323,9 @@ void onElementError(gchar *_source, gchar *_message, gchar *_debug_info) {
                 return;
             }
             currentInstance->_view.onElementError(@{
-                                    @"source": [NSString stringWithUTF8String:source],
-                                    @"message": [NSString stringWithUTF8String:message],
-                                    @"debug_info": [NSString stringWithUTF8String:debug_info]
+                                    @"source": source,
+                                    @"message": message,
+                                    @"debug_info": debug_info
                                     });
         });
 }
@@ -416,14 +399,6 @@ void onEventSaved(gchar *file_path) {
         currentInstance = nil;
 
         rct_gst_terminate();
-        g_free(new_uri);
-        g_free(source);
-        g_free(message);
-        g_free(debug_info);
-        new_uri = NULL;
-        source = NULL;
-        message = NULL;
-        debug_info = NULL;
         [self destroyDrawableSurface];
     }
 }
