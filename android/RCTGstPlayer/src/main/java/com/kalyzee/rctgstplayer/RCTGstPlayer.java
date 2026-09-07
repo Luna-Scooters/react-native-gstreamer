@@ -81,8 +81,6 @@ public class RCTGstPlayer extends SimpleViewManager {
 
         if (Command.is(commandType, Command.saveEvent))
             this.playerController.saveEvent(args.getString(0));
-
-        // recreateView is ignored on purpose : Not needed on android (wrong impl of vtdec on ios)
     }
 
     // Commands (JS callable methods listing map)
