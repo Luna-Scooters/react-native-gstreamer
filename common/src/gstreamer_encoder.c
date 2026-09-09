@@ -138,9 +138,22 @@ static gboolean encoder_build(void)
     gchar *selected_encoder = rct_gst_find_h264_encoder();
     g_print("Shared encoder: %s\n", selected_encoder);
 
-    // No pinned raw format: videoconvert negotiates whatever the encoder accepts.
+    // Offer only formats GStreamer's androidmedia plugin can actually map to an
+    // Android MediaCodec color format (NV12 for hardware amcvidenc-*, I420 for
+    // the software openh264enc fallback used on MediaTek devices - see
+    // rct_gst_find_h264_encoder). Leaving format fully unconstrained lets
+    // videoconvert negotiate whatever's cheapest upstream, which on some
+    // devices' GL chain (glcolorconvert/gldownload) ends up as a format like
+    // RGB10A2_LE that amcvidenc's sink caps nominally list but
+    // gst_amc_color_format_info_set can't actually map - the encoder then
+    // rejects the caps at set_format time, and that failure cascades back
+    // through video-tee as a decoder "not-negotiated" error. Listing candidates
+    // instead of picking one by encoder name lets real negotiation - intersecting
+    // this list against the selected encoder's own sink caps - pick whichever it
+    // actually supports, so this doesn't need updating if another encoder type
+    // shows up later.
     GString *caps = g_string_new("video/x-raw");
-    g_string_append_printf(caps, ",framerate=%d/1", fps);
+    g_string_append_printf(caps, ",format=(string){NV12,I420,YV12},framerate=%d/1", fps);
 
 #if defined(__APPLE__)
     const gchar *gl_normalize = "";
