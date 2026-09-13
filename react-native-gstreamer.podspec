@@ -12,6 +12,8 @@ Pod::Spec.new do |s|
   s.platform     = :ios, "13.0"
   s.source       = { :git => "#{s.homepage}.git", :tag => "#{s.version}" }
 
+  gst_plugins = `cmake -P gst-plugins.cmake`.strip
+
   s.source_files = "ios/RCTGstPlayer/*.{h,m}", "common/include/*.h", "common/src/*.c"
   s.public_header_files = "ios/RCTGstPlayer/*.h"
   
@@ -21,6 +23,7 @@ Pod::Spec.new do |s|
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
+    'GCC_PREPROCESSOR_DEFINITIONS' => "$(inherited) GST_IOS_PLUGIN_LIST(F)=#{gst_plugins}",
     "HEADER_SEARCH_PATHS[sdk=iphoneos*]"        => "\"#{gst_device}/Headers\"",
     "HEADER_SEARCH_PATHS[sdk=iphonesimulator*]" => "\"#{gst_sim}/Headers\"",
   }

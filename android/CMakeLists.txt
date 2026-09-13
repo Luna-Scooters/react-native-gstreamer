@@ -33,18 +33,8 @@ list(APPEND CMAKE_MODULE_PATH "${GStreamer_ROOT_DIR}/share/cmake")
 
 include("${GStreamer_ROOT_DIR}/share/gst-android/ndk-build/plugins.cmake")
 
-# Select GStreamer plugins
-set(GSTREAMER_PLUGINS
-    ${GSTREAMER_PLUGINS_CORE}
-    ${GSTREAMER_PLUGINS_PLAYBACK}
-    ${GSTREAMER_PLUGINS_CODECS}
-    ${GSTREAMER_PLUGINS_NET}
-    ${GSTREAMER_PLUGINS_SYS}
-    ${GSTREAMER_PLUGINS_CODECS_RESTRICTED}
-    ${GSTREAMER_PLUGINS_ENCODING}
-    ${GSTREAMER_PLUGINS_VIS}
-    ${GSTREAMER_PLUGINS_EFFECTS}
-    ${GSTREAMER_PLUGINS_NET_RESTRICTED})
+# The shared plugins list
+include(${MODULE_ROOT}/gst-plugins.cmake)
 
 set(GStreamer_EXTRA_DEPS glib-2.0)
 
