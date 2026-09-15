@@ -15,22 +15,16 @@ G_PASTE(g_io_module_, G_PASTE(name, _load_static)) ()
 #define GST_PLUGIN_STATIC_DECLARE(name) extern void G_PASTE(gst_plugin_, G_PASTE(name, _register)) (void)
 #define GST_PLUGIN_STATIC_REGISTER(name) G_PASTE(gst_plugin_, G_PASTE(name, _register)) ()
 
-/* Uncomment each line to enable the plugin categories that your application needs.
- * You can also enable individual plugins. See gst_ios_init.c to see their names
+/* GST_IOS_PLUGIN_LIST(F)=F(coreelements)F(rtsp)...F(applemedia), derived from
+ * gst-plugins.cmake and passed in as a build setting. gst_ios_init.m expands it
+ * through the two helpers below.
  */
+#ifndef GST_IOS_PLUGIN_LIST
+#error "GST_IOS_PLUGIN_LIST is undefined -- the podspec puts it in the pod's GCC_PREPROCESSOR_DEFINITIONS; a CMake target passes GST_IOS_PLUGIN_LIST_DEFINE from gst-plugins.cmake."
+#endif
 
-#define GST_IOS_PLUGINS_CORE
-#define GST_IOS_PLUGINS_CODECS_RESTRICTED
-#define GST_IOS_PLUGINS_ENCODING
-#define GST_IOS_PLUGINS_CODECS_GPL
-#define GST_IOS_PLUGINS_NET_RESTRICTED
-#define GST_IOS_PLUGINS_SYS
-#define GST_IOS_PLUGINS_VIS
-#define GST_IOS_PLUGINS_PLAYBACK
-#define GST_IOS_PLUGINS_EFFECTS
-#define GST_IOS_PLUGINS_CODECS
-#define GST_IOS_PLUGINS_NET
-#define GST_IOS_PLUGIN_VIDEOCONVERTSCALE
+#define GST_IOS_PLUGIN_DECLARE(name) GST_PLUGIN_STATIC_DECLARE(name);
+#define GST_IOS_PLUGIN_REGISTER(name) GST_PLUGIN_STATIC_REGISTER(name);
 
 void gst_ios_init (void);
 

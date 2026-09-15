@@ -71,3 +71,6 @@ android/RCTGstPlayer/gst-build-armeabi0/
 android/RCTGstPlayer/gst-build-x86/
 android/RCTGstPlayer/gst-build-x86_64/
 ios/RCTGstPlayer/build/
+build/
+android/RCTGstPlayer/.cxx/
+android/RCTGstPlayer/build/
