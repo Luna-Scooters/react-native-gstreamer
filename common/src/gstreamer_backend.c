@@ -740,6 +740,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // pad appears. Only the codec-agnostic tail is static here.
     gchar *pipeline_template =
         "rtspsrc is-live=true protocols=tcp latency=0 name=src "
+        "do-retransmission=false tcp-timeout=2000000 "
+        "teardown-timeout=2000000000 "
         "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
         "tee name=video-tee "
         "! queue "
