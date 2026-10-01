@@ -74,3 +74,11 @@ ios/RCTGstPlayer/build/
 build/
 android/RCTGstPlayer/.cxx/
 android/RCTGstPlayer/build/
+tests/common/check_codec
+tests/common/check_backend
+tests/.build/
+tests/android/build/
+tests/**/*.dSYM/
+tests/android/src/
+android/RCTGstPlayer/src/main/jni/src/
+tests/build/
