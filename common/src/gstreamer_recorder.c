@@ -82,7 +82,7 @@ void rct_gst_start_recording(const gchar *file_path)
 void rct_gst_stop_recording(void)
 {
     if (!rct_gst_is_recording()) {
-        g_printerr("stop_recording: not recording\n");
+        g_print("stop_recording: not recording\n");
         return;
     }
     writer_close(&recorder.video_writer);
