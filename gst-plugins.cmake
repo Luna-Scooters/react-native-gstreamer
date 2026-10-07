@@ -19,8 +19,6 @@ if(APPLE)
     list(APPEND GSTREAMER_PLUGINS applemedia)
 elseif(ANDROID)
     list(APPEND GSTREAMER_PLUGINS androidmedia)
-    list(APPEND GSTREAMER_PLUGINS opengl)      # glimagesink
-    list(APPEND GSTREAMER_PLUGINS autoconvert) # autovideoconvert
 endif()
 
 option(GST_DEBUG_PIPELINE "Include plugins for the isDebugging test pipeline" OFF)
