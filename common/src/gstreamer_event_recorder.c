@@ -182,7 +182,7 @@ void rct_gst_event_recorder_save(const gchar *file_path)
         return;
     }
     if (eventRecorder.video_writer.rec_bin) {
-        g_printerr("event save: a clip is already recording\n");
+        g_print("event save: a clip is already recording\n");
         return;
     }
     if (!pipeline) {
