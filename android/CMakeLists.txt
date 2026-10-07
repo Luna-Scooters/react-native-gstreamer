@@ -46,7 +46,7 @@ find_package(GStreamerMobile REQUIRED COMPONENTS
     ${GSTREAMER_PLUGINS})
 
 # The shared platform-independent code, with GStreamer supplied from here.
-add_subdirectory(${MODULE_ROOT} common)
+add_subdirectory(${MODULE_ROOT}/common common)
 target_link_libraries(rngstcommon PUBLIC GStreamer::mobile)
 
 # GStreamer's static libs carry full DWARF; keeping it makes libgstreamer_android.so
