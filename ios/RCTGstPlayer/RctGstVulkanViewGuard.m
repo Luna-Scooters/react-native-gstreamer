@@ -62,9 +62,10 @@ static void releaseGuard(gpointer guard, GClosure *closure)
     if (!_window)
         return;
 
-    // Detach the view, which would otherwise keep pointing at the window once
-    // it is freed.
-    [_view setGstWindow:NULL];
+    // The close vfunc gst_vulkan_window_close() skipped: it detaches the view and
+    // drops GStreamer's own references to the view and its layer.
+    if (vulkanWindowFromUIView(_view) == _window)
+        GST_VULKAN_WINDOW_GET_CLASS(_window)->close(_window);
 
     [_view removeFromSuperview];
 
