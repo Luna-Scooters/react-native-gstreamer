@@ -6,6 +6,7 @@
 //
 
 #import "EaglUIView.h"
+#import "RctGstVulkanViewGuard.h"
 #import <QuartzCore/CAMetalLayer.h>
 
 @implementation EaglUIView
@@ -35,5 +36,16 @@
     return self->handle;
 }
 
-@end
+// vulkansink adds its view here on the main thread, already attached to its window.
+- (void)didAddSubview:(UIView *)subview
+{
+    [super didAddSubview:subview];
 
+    if (![NSStringFromClass([subview class]) isEqualToString:@"GstVulkanUIView"])
+        return;
+
+    // Owned by the window's close handler from here on.
+    (void)[[RctGstVulkanViewGuard alloc] initWithView:subview];
+}
+
+@end
