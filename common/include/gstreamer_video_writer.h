@@ -3,17 +3,25 @@
 
 #include <gst/gst.h>
 
+typedef struct RctGstWriterGate RctGstWriterGate;
+
 // A reusable "encoded pad -> MP4 file" sink branch, shared by the trip and event recorders.
 typedef struct {
     GstElement *rec_bin;          // queue ! h264parse ! mp4mux ! filesink
     guint       watchdog_id;
+    GstPad     *gate_src;         // source pad carrying the gate probe (reffed)
+    gulong      gate_id;
+    RctGstWriterGate *gate;       // owned by the probe
     guint       generation;       // bumped per file, to tell a stale bin's messages apart
     gchar      *file_path;
     void      (*on_done)(gchar *path);  // onRecordingFinished / onEventSaved
 } RctGstVideoWriter;
 
 // Build the muxing tail for `path`, bring it up in the pipeline and link `src`
-// into it. Caller owns `src` and `done`. 
+// into it. Caller owns `src` and `done`. A probe on `src` drops buffers once the
+// branch has failed or is being torn down, so the source sees GST_FLOW_OK rather
+// than an error; it is removed after on_done, which must block or release `src`.
+// After writer_reset it stays until the next writer_start or `src` is released.
 // Returns FALSE on failure.
 gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *));
 
