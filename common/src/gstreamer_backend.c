@@ -555,7 +555,7 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
         return GST_STATE_CHANGE_ASYNC;
     }
 
-    GstStateChangeReturn validity = gst_element_set_state(target, state);
+    GstStateChangeReturn validity = rct_gst_display_set_pipeline_state(target, state);
     g_print("Validity : %s\n", gst_element_state_change_return_get_name(validity));
 
     return validity;
@@ -569,7 +569,8 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 //      on a streaming thread and reads its sink and surface, and the watch
 //      dereferences `pipeline` from the GMainLoop thread, which is NOT the thread
 //      calling this on either platform,
-//   3. the state change to NULL, which joins the streaming threads,
+//   3. the state change to NULL, which joins the streaming threads - the display
+//      first, see rct_gst_display_set_pipeline_state(),
 //   4. the last ref.
 //
 // Safe to call with no pipeline, and safe to call twice.
@@ -595,12 +596,12 @@ static void destroy_pipeline(void)
             gst_bus_set_sync_handler(pipeline_bus, NULL, NULL, NULL);
         }
 
-        gst_element_set_state(target, GST_STATE_NULL);
+        rct_gst_display_set_pipeline_state(target, GST_STATE_NULL);
+        rct_gst_display_reset(target);
         gst_object_unref(target);
     }
     bus = NULL;   // unreffed in rct_gst_init; never dereference it again
 
-    rct_gst_display_reset();
     video_tee = NULL;
     audio_level_element = NULL;   // owned by the bin from create_audio_sink()
 }

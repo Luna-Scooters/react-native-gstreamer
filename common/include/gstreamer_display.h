@@ -27,7 +27,7 @@
 // of filling, blocking the tee (and with it the decoder and the encoder branch),
 // then replaying the backlog at sync=false speed.
 #define RCT_GST_DISPLAY_BRANCH                                                  \
-    "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream " \
+    "queue name=display-queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream " \
     "! videoconvert ! video/x-raw,format=NV12 "                                 \
     "! vulkanupload ! vulkancolorconvert "                                      \
     "! vulkansink sync=false name=" RCT_GST_VIDEO_SINK " enable-last-sample=true"
@@ -43,8 +43,12 @@ GstSample *rct_gst_pull_last_sample(void);
 // a window. Streaming thread.
 GstBusSyncReply rct_gst_display_bus_sync(GstBus *bus, GstMessage *message, gpointer user_data);
 
-// Drop the video sink, once the pipeline is gone. The surface is kept for the
-// next pipeline.
-void rct_gst_display_reset(void);
+// The pipeline to `state`. Below PAUSED, the display goes down first; without a
+// surface, it stays down. Any thread.
+GstStateChangeReturn rct_gst_display_set_pipeline_state(GstElement *pipeline, GstState state);
+
+// Drop the video sink, once `pipeline` is in NULL and before its last ref goes.
+// The surface is kept for the next pipeline.
+void rct_gst_display_reset(GstElement *pipeline);
 
 #endif /* gstreamer_display_h */
