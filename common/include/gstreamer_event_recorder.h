@@ -24,7 +24,8 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
 
 // Trigger: save a clip [event - PRE, event + POST] to file_path. Returns
 // immediately; the backlog flushes now and POST seconds of live footage follow,
-// then onEventSaved(path) fires. No-op if not buffering or a clip is recording.
+// then onEventSaved(path) fires. A clip that fails to record is deleted and
+// onEventSaved never fires. No-op if not buffering or a clip is recording.
 void rct_gst_event_recorder_save(const gchar *file_path);
 
 gboolean rct_gst_event_recorder_is_buffering(void);

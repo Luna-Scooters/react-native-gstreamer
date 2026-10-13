@@ -501,6 +501,11 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     g_clear_error(&err);
     g_free(debug_info);
 
+    // A recording branch failing only loses that file: the writer drops its
+    // branch, and the live stream (and any other recording) keeps running.
+    if (writer_handle_message(msg))
+        return;
+
 #if defined(__APPLE__)
     dispatch_sync(dispatch_get_main_queue(), ^{
         rct_gst_set_pipeline_state(GST_STATE_NULL);

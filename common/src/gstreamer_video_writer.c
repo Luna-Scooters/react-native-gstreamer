@@ -10,7 +10,11 @@
 //  On close: push EOS into the muxer (own thread) so it writes the trailer. The
 //  bin forwards the filesink's EOS message (message-forward), which the bus watch
 //  routes back here via writer_handle_message() to tear down and fire
-//  on_done(path). A 3s watchdog forces teardown if EOS never arrives.
+//  on_done(path, TRUE). A 3s watchdog forces teardown if EOS never arrives.
+//
+//  An error from inside the bin only fails that writer: writer_handle_message()
+//  tears the branch down and fires on_done(path, FALSE), and the rest of the
+//  pipeline keeps running.
 //
 
 #include "gstreamer_video_writer.h"
@@ -141,7 +145,7 @@ static void writer_gate_install(RctGstVideoWriter *writer, GstPad *src)
 /* ---- lifecycle ---- */
 
 // Main loop: tear the branch down and fire on_done. Idempotent via the rec_bin guard.
-static void writer_teardown(RctGstVideoWriter *writer)
+static void writer_teardown(RctGstVideoWriter *writer, gboolean ok)
 {
     if (!writer->rec_bin)
         return;   // already finalized
@@ -167,7 +171,7 @@ static void writer_teardown(RctGstVideoWriter *writer)
     gchar *path = writer->file_path;
     writer->file_path = NULL;
     if (writer->on_done)
-        writer->on_done(path);
+        writer->on_done(path, ok);
     g_free(path);
     if (writer->gate_id == gate_id)
         writer_gate_remove(writer);
@@ -180,7 +184,7 @@ static gboolean writer_watchdog(gpointer user_data)
     RctGstVideoWriter *writer = (RctGstVideoWriter *)user_data;
     writer->watchdog_id = 0;   // this source is finishing; don't remove it again
     g_printerr("writer: EOS never reached the filesink, forcing teardown\n");
-    writer_teardown(writer);
+    writer_teardown(writer, TRUE);
     return G_SOURCE_REMOVE;
 }
 
@@ -197,7 +201,7 @@ static gpointer writer_push_eos(gpointer data)
     return NULL;
 }
 
-gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *))
+gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *, gboolean))
 {
     if (!writer || !src || !path || !*path || !pipeline) {
         g_printerr("writer_start: bad args or pipeline not ready\n");
@@ -329,11 +333,18 @@ gboolean writer_handle_message(GstMessage *message)
             GstMessage *forwarded = NULL;
             gst_structure_get(s, "message", GST_TYPE_MESSAGE, &forwarded, NULL);
             if (forwarded && GST_MESSAGE_TYPE(forwarded) == GST_MESSAGE_EOS && current)
-                writer_teardown(writer);
+                writer_teardown(writer, TRUE);
             if (forwarded)
                 gst_message_unref(forwarded);
             return TRUE;
         }
+        case GST_MESSAGE_ERROR:
+            if (current) {
+                g_printerr("writer: recording to %s failed, dropping its branch\n",
+                           writer->file_path);
+                writer_teardown(writer, FALSE);
+            }
+            return TRUE;
         default:
             return FALSE;
     }

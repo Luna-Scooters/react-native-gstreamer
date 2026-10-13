@@ -1,5 +1,5 @@
 // The MP4 writer branch (gstreamer_video_writer.c) on a live test stream: when
-// it may hand a file over.
+// it may hand a file over, and what a failing branch may take down with it.
 
 #include "support/backend.h"
 #include "support/gst_test.h"
@@ -22,6 +22,7 @@ namespace {
 // pointer, so the fixture talks to it through this.
 struct Done {
     bool fired = false;
+    bool ok = false;
     bool afterEos = false;   // filesink had finished EOS when on_done fired
     bool playable = false;   // checked inside on_done, i.e. when the app gets it
 };
@@ -52,11 +53,12 @@ bool isPlayable(const char *path)
     return eos;
 }
 
-void onDone(gchar *path)
+void onDone(gchar *path, gboolean ok)
 {
     done.fired = true;
+    done.ok = ok;
     done.afterEos = recsinkEos;
-    done.playable = isPlayable(path);
+    done.playable = ok && isPlayable(path);
 }
 
 // Holds filesink in the EOS event before it gets to flush its buffered tail,
@@ -213,11 +215,38 @@ TEST_F(VideoWriter, HandsTheFileOverOnlyOnceItIsWritten)
     ASSERT_TRUE(waitUntil([] { return done.fired; }, 5s)) << "on_done never fired";
     gst_pad_remove_probe(teePad, holdId);
 
+    EXPECT_TRUE(done.ok) << "the writer reported a failure";
     EXPECT_TRUE(done.afterEos) << "the file was handed over before filesink had written it all";
     EXPECT_TRUE(done.playable);
     // Tearing down while filesink still flushes its tail fails that flush
     // ("Error while writing to file") and loses the final moov.
     EXPECT_EQ(errors, 0);
     EXPECT_TRUE(liveKeepsFlowing());
+    g_unlink(path.c_str());
+}
+
+// A recording that fails loses its file and nothing else: no pipeline-wide
+// error, and the live consumer on the same tee keeps going.
+TEST_F(VideoWriter, AFailingFileOnlyDropsItsOwnBranch)
+{
+    ASSERT_TRUE(writer_start(&writer, teePad, "/nonexistent-dir/rngst_writer.mp4", onDone));
+
+    ASSERT_TRUE(waitUntil([] { return done.fired; }, 5s)) << "the failure never reached on_done";
+    EXPECT_FALSE(done.ok);
+    EXPECT_EQ(writer.rec_bin, nullptr) << "the failed branch is still in the pipeline";
+    EXPECT_EQ(pipelineErrors, 0) << "a writer error was treated as a pipeline error";
+    EXPECT_TRUE(liveKeepsFlowing()) << "the failed writer stalled the shared tee";
+
+    // And the next file still records.
+    std::string path = tempPath("rngst_writer_after_failure.mp4");
+    done = Done{};
+    ASSERT_TRUE(writer_start(&writer, teePad, path.c_str(), onDone));
+    waitUntil([] { return false; }, 1500ms);
+    gulong holdId = gst_pad_add_probe(teePad, kHoldProbe, hold, nullptr, nullptr);
+    writer_close(&writer);
+    ASSERT_TRUE(waitUntil([] { return done.fired; }, 5s));
+    gst_pad_remove_probe(teePad, holdId);
+    EXPECT_TRUE(done.ok);
+    EXPECT_TRUE(done.playable);
     g_unlink(path.c_str());
 }
