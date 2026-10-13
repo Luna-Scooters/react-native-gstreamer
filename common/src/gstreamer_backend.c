@@ -7,6 +7,7 @@
 
 #include "gstreamer_backend.h"
 #include "gstreamer_codec.h"
+#include "gstreamer_video_writer.h"
 
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
@@ -499,6 +500,7 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     }
     g_clear_error(&err);
     g_free(debug_info);
+
 #if defined(__APPLE__)
     dispatch_sync(dispatch_get_main_queue(), ^{
         rct_gst_set_pipeline_state(GST_STATE_NULL);
@@ -622,7 +624,8 @@ static gboolean cb_bus_watch(GstBus *bus, GstMessage *message, gpointer user_dat
             break;
             
         case GST_MESSAGE_ELEMENT:
-            cb_message_element(bus, message, user_data);
+            if (!writer_handle_message(message))   // a recording branch's forwarded EOS
+                cb_message_element(bus, message, user_data);
             break;
             
         case GST_MESSAGE_ASYNC_DONE:

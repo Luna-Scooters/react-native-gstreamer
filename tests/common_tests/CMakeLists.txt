@@ -9,3 +9,4 @@ endif()
 
 add_gst_suite(codec)
 add_gst_suite(backend)
+add_gst_suite(video_writer)
