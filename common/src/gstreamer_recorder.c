@@ -30,15 +30,20 @@ void rct_gst_recorder_reset(void)
     }
 }
 
-// Writer finalize callback (main loop): the file is written — drop our state,
-// fire onRecordingFinished, then apply any deferred pipeline state.
-static void recorder_on_done(gchar *file_path)
+// Writer finalize callback (main loop): the recording is over — drop our state,
+// fire onRecordingFinished, then apply any deferred pipeline state. A failed
+// recording ends the same way: fragmented MP4 keeps it playable up to the last
+// fragment, and the app still needs to learn the recording stopped.
+static void recorder_on_done(gchar *file_path, gboolean ok)
 {
     (void)file_path;   // the app is notified via onRecordingFinished
     GstState deferred = recorder.deferred_state;
 
     rct_gst_recorder_reset();
-    g_print("Recording stopped and file finalized\n");
+    if (ok)
+        g_print("Recording stopped and file finalized\n");
+    else
+        g_printerr("Recording failed, file kept up to its last fragment\n");
 
     RctGstConfiguration *cfg = rct_gst_get_configuration();
     if (cfg->onRecordingFinished)

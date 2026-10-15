@@ -23,6 +23,8 @@
 #include "gstreamer_encoder.h"
 #include "gstreamer_video_writer.h"
 
+#include <glib/gstdio.h>
+
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
 
@@ -81,6 +83,21 @@ static GstPadProbeReturn evr_gate_probe_keyframe(GstPad *pad, GstPadProbeInfo *i
 
 /* ---- clip lifecycle ---- */
 
+// Back to holding a rolling backlog: block the queue again and drop the keyframe
+// gate if it never saw a keyframe (shouldn't happen with the FKU).
+static void evr_hold_backlog(void)
+{
+    if (!eventRecorder.event_queue_src)
+        return;   // disarmed
+    if (!eventRecorder.block_id)
+        eventRecorder.block_id = gst_pad_add_probe(eventRecorder.event_queue_src,
+            GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER, evr_block_probe, NULL, NULL);
+    if (eventRecorder.gate_id) {
+        gst_pad_remove_probe(eventRecorder.event_queue_src, eventRecorder.gate_id);
+        eventRecorder.gate_id = 0;
+    }
+}
+
 // POST elapsed: stop the clip. Re-block the backlog so no more frames enter the
 // muxer, then EOS the muxer to finalize. Main loop.
 static gboolean evr_stop(gpointer user_data)
@@ -90,16 +107,31 @@ static gboolean evr_stop(gpointer user_data)
     if (!eventRecorder.video_writer.rec_bin || !eventRecorder.event_queue_src)
         return G_SOURCE_REMOVE;
 
-    // Back to holding a rolling backlog.
-    eventRecorder.block_id = gst_pad_add_probe(eventRecorder.event_queue_src,
-        GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER, evr_block_probe, NULL, NULL);
-    if (eventRecorder.gate_id) {   // gate never saw a keyframe (shouldn't happen with the FKU)
-        gst_pad_remove_probe(eventRecorder.event_queue_src, eventRecorder.gate_id);
-        eventRecorder.gate_id = 0;
-    }
-
+    evr_hold_backlog();
     writer_close(&eventRecorder.video_writer);
     return G_SOURCE_REMOVE;
+}
+
+// Writer finalize callback (main loop). A good clip goes to the app. A failed one
+// is deleted (it's incomplete and the app never hears of it), and the backlog is
+// held again: the writer may have failed mid-clip, with the queue still flowing.
+static void evr_on_done(gchar *file_path, gboolean ok)
+{
+    if (ok) {
+        RctGstConfiguration *cfg = rct_gst_get_configuration();
+        if (cfg->onEventSaved)
+            cfg->onEventSaved(file_path);
+        return;
+    }
+
+    g_printerr("event clip failed, discarding %s\n", file_path);
+    g_unlink(file_path);
+
+    if (eventRecorder.stop_id) {
+        g_source_remove(eventRecorder.stop_id);
+        eventRecorder.stop_id = 0;
+    }
+    evr_hold_backlog();
 }
 
 // Periodically ask the shared encoder for a keyframe so clips can start close to
@@ -192,7 +224,7 @@ void rct_gst_event_recorder_save(const gchar *file_path)
 
     eventRecorder.buffer_count = 0;
 
-    if(!writer_start(&eventRecorder.video_writer, eventRecorder.event_queue_src, file_path, rct_gst_get_configuration()->onEventSaved)) {
+    if(!writer_start(&eventRecorder.video_writer, eventRecorder.event_queue_src, file_path, evr_on_done)) {
         g_printerr("event save: failed to start video writer\n");
         return;
     }

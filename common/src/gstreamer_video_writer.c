@@ -7,9 +7,14 @@
 //
 //    src ! [ queue ! h264parse ! mp4mux fragment-duration=1000 ! filesink ]
 //
-//  On close: push EOS into the muxer (own thread) so it writes the trailer; an
-//  EOS probe on the filesink schedules teardown on the main loop and fires
-//  on_done(path). A 3s watchdog forces teardown if EOS never arrives.
+//  On close: push EOS into the muxer (own thread) so it writes the trailer. The
+//  bin forwards the filesink's EOS message (message-forward), which the bus watch
+//  routes back here via writer_handle_message() to tear down and fire
+//  on_done(path, TRUE). A 3s watchdog forces teardown if EOS never arrives.
+//
+//  An error from inside the bin only fails that writer: writer_handle_message()
+//  tears the branch down and fires on_done(path, FALSE), and the rest of the
+//  pipeline keeps running.
 //
 
 #include "gstreamer_video_writer.h"
@@ -20,13 +25,132 @@ extern GstElement *pipeline;
 static const guint WRITER_FINALIZE_TIMEOUT_MS = 3000;
 static const GstClockTime WRITER_STATE_TIMEOUT = 100 * GST_MSECOND;
 
-// Main loop: tear the branch down and fire on_done. Reached from the filesink EOS
-// probe (normal) or the watchdog (forced). Idempotent via the rec_bin guard.
-static gboolean writer_finalize(gpointer user_data)
+// Tag every element of a record bin with its writer and that writer's generation,
+// so a bus message can be traced back to its writer — even once the bin has been
+// removed and the element no longer has a parent to walk up to.
+static GQuark writer_quark(void)
 {
-    RctGstVideoWriter *writer = (RctGstVideoWriter *)user_data;
+    static GQuark quark = 0;
+    if (!quark)
+        quark = g_quark_from_static_string("rct-gst-video-writer");
+    return quark;
+}
+
+static GQuark writer_generation_quark(void)
+{
+    static GQuark quark = 0;
+    if (!quark)
+        quark = g_quark_from_static_string("rct-gst-video-writer-generation");
+    return quark;
+}
+
+static void writer_tag(GstObject *object, RctGstVideoWriter *writer)
+{
+    g_object_set_qdata(G_OBJECT(object), writer_quark(), writer);
+    g_object_set_qdata(G_OBJECT(object), writer_generation_quark(),
+                       GUINT_TO_POINTER(writer->generation));
+}
+
+static void writer_tag_bin(RctGstVideoWriter *writer)
+{
+    writer_tag(GST_OBJECT(writer->rec_bin), writer);
+
+    GstIterator *it = gst_bin_iterate_recurse(GST_BIN(writer->rec_bin));
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK:
+                writer_tag(GST_OBJECT(g_value_get_object(&item)), writer);
+                g_value_reset(&item);
+                break;
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(it);
+                break;
+            default:
+                done = TRUE;
+                break;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(it);
+}
+
+/* ---- source gate ---- */
+
+// Sits on the source pad and shields the source from this branch. The source is
+// a tee (trip) or the event backlog queue, and neither survives a non-OK push: a
+// tee hands FLUSHING / ERROR upstream, stalling the shared encoder and the live
+// view with it, and a queue posts not-linked / error as a pipeline error. So
+// whenever the branch can't take data — failed downstream, or being torn down —
+// drop at the source and report OK instead.
+struct RctGstWriterGate {
+    gint    open;        // atomic: FALSE once the branch is being torn down
+    GstPad *front_src;   // the record bin's front queue src: its last flow return
+                         // turns non-OK as soon as anything downstream fails
+};
+
+static void writer_gate_free(gpointer data)
+{
+    RctGstWriterGate *gate = data;
+    gst_object_unref(gate->front_src);
+    g_free(gate);
+}
+
+static GstPadProbeReturn writer_gate_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    (void)pad; (void)info;
+    RctGstWriterGate *gate = user_data;
+    if (g_atomic_int_get(&gate->open) &&
+        gst_pad_get_last_flow_return(gate->front_src) == GST_FLOW_OK)
+        return GST_PAD_PROBE_OK;
+    return GST_PAD_PROBE_DROP;
+}
+
+static void writer_gate_shut(RctGstVideoWriter *writer)
+{
+    if (writer->gate)
+        g_atomic_int_set(&writer->gate->open, FALSE);
+}
+
+// Removed once the owner has had on_done to block or release the source. It must
+// not linger: as a non-blocking probe it runs before any blocking one, so a shut
+// gate would drain the event backlog that the owner's block probe should hold.
+static void writer_gate_remove(RctGstVideoWriter *writer)
+{
+    if (writer->gate_src) {
+        gst_pad_remove_probe(writer->gate_src, writer->gate_id);   // frees the gate
+        gst_object_unref(writer->gate_src);
+    }
+    writer->gate_src = NULL;
+    writer->gate_id = 0;
+    writer->gate = NULL;
+}
+
+static void writer_gate_install(RctGstVideoWriter *writer, GstPad *src)
+{
+    GstElement *front = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recq");
+    RctGstWriterGate *gate = g_new0(RctGstWriterGate, 1);
+    gate->open = TRUE;
+    gate->front_src = gst_element_get_static_pad(front, "src");
+    gst_object_unref(front);
+
+    writer->gate = gate;
+    writer->gate_src = gst_object_ref(src);
+    writer->gate_id = gst_pad_add_probe(src,
+        GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_BUFFER_LIST,
+        writer_gate_probe, gate, writer_gate_free);
+}
+
+/* ---- lifecycle ---- */
+
+// Main loop: tear the branch down and fire on_done. Idempotent via the rec_bin guard.
+static void writer_teardown(RctGstVideoWriter *writer, gboolean ok)
+{
     if (!writer->rec_bin)
-        return G_SOURCE_REMOVE;   // already finalized
+        return;   // already finalized
+
+    writer_gate_shut(writer);
 
     if (writer->watchdog_id) {
         g_source_remove(writer->watchdog_id);
@@ -40,22 +164,28 @@ static gboolean writer_finalize(gpointer user_data)
         gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
     writer->rec_bin = NULL;
 
+    // The gate keeps dropping until on_done has blocked (event) or released
+    // (trip) the now-unlinked source. on_done may start the next file, which
+    // replaces the gate itself, so only remove the one this file installed.
+    gulong gate_id = writer->gate_id;
     gchar *path = writer->file_path;
     writer->file_path = NULL;
     if (writer->on_done)
-        writer->on_done(path);
+        writer->on_done(path, ok);
     g_free(path);
-    return G_SOURCE_REMOVE;
+    if (writer->gate_id == gate_id)
+        writer_gate_remove(writer);
 }
 
-// Fires when EOS reaches the filesink: the file is finalized — schedule teardown.
-static GstPadProbeReturn writer_eos_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+// Watchdog: EOS never reached the filesink. Fragmented MP4 keeps everything up
+// to the last fragment playable, so the file is still handed over.
+static gboolean writer_watchdog(gpointer user_data)
 {
-    (void)pad;
-    if (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info)) != GST_EVENT_EOS)
-        return GST_PAD_PROBE_OK;
-    g_idle_add(writer_finalize, user_data);
-    return GST_PAD_PROBE_REMOVE;
+    RctGstVideoWriter *writer = (RctGstVideoWriter *)user_data;
+    writer->watchdog_id = 0;   // this source is finishing; don't remove it again
+    g_printerr("writer: EOS never reached the filesink, forcing teardown\n");
+    writer_teardown(writer, TRUE);
+    return G_SOURCE_REMOVE;
 }
 
 // Pushes EOS into the muxer on its own thread. gst_pad_send_event(EOS) travels
@@ -71,29 +201,32 @@ static gpointer writer_push_eos(gpointer data)
     return NULL;
 }
 
-gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *))
+gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *, gboolean))
 {
     if (!writer || !src || !path || !*path || !pipeline) {
         g_printerr("writer_start: bad args or pipeline not ready\n");
         return FALSE;
     }
 
+    writer_gate_remove(writer);   // the previous file's, if any
     writer->rec_bin = NULL;
     writer->watchdog_id = 0;
+    writer->generation++;
     writer->on_done = done;
     writer->file_path = g_strdup(path);
 
     // Front queue decouples filesink's disk I/O from the source's streaming thread
     // (a slow write must not stall the shared encoder / the other consumers), and
     // — being the element the source links to — lets the whole branch tear down
-    // atomically, so the source is never left flowing into an orphaned pad.
+    // atomically. The source gate watches its src pad to tell when the branch
+    // can no longer take data.
     // h264parse before mp4mux: its video caps steer mp4mux to a VIDEO pad (without
     // it mp4mux picks an audio pad and the link fails with NOFORMAT). Fragmented
     // MP4 keeps the file playable through crashes/forced teardown. We do NOT touch
     // PTS/DTS — mp4mux normalizes the timeline, and the encoder emits reordered
     // (B-frame) DTS that must stay monotonic.
     gchar *desc = g_strdup_printf(
-        "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
+        "queue name=recq max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "h264parse ! mp4mux fragment-duration=1000 "
         "fragment-mode=first-moov-then-finalise ! "
         "filesink name=recsink async=false location=\"%s\"",
@@ -110,20 +243,13 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
         return FALSE;
     }
 
-    GstElement *recsink = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recsink");
-    if (!recsink) {
-        g_printerr("writer_start: recsink not found in record bin\n");
-        gst_object_unref(writer->rec_bin);
-        writer->rec_bin = NULL;
-        g_free(writer->file_path);
-        writer->file_path = NULL;
-        return FALSE;
-    }
-    GstPad *sinkpad = gst_element_get_static_pad(recsink, "sink");
-    gst_pad_add_probe(sinkpad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
-                      writer_eos_probe, writer, NULL);
-    gst_object_unref(sinkpad);
-    gst_object_unref(recsink);
+    // Finalize on the filesink's EOS *message*, not an EOS probe on its pad: a
+    // probe fires before filesink has handled the event, and tearing down then
+    // flushes the sink mid-write, losing the file's tail ("Error while writing to
+    // file"). The message is posted only once filesink has flushed. Bins swallow
+    // child EOS messages, so ask this one to forward them.
+    g_object_set(writer->rec_bin, "message-forward", TRUE, NULL);
+    writer_tag_bin(writer);
 
     // Bring the branch to PLAYING BEFORE linking, so the source only pushes into a
     // ready muxer (linking first can wedge a live streaming thread with FLUSHING).
@@ -131,11 +257,14 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
     gst_element_sync_state_with_parent(writer->rec_bin);
     gst_element_get_state(writer->rec_bin, NULL, NULL, WRITER_STATE_TIMEOUT);
 
+    writer_gate_install(writer, src);
+
     GstPad *bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
     GstPadLinkReturn link_ret = gst_pad_link(src, bin_sink);
     gst_object_unref(bin_sink);
     if (link_ret != GST_PAD_LINK_OK) {
         g_printerr("writer_start: failed to link src -> writer (%d)\n", link_ret);
+        writer_gate_remove(writer);   // never linked: nothing to shield
         gst_element_set_state(writer->rec_bin, GST_STATE_NULL);
         gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
         writer->rec_bin = NULL;
@@ -151,9 +280,9 @@ void writer_close(RctGstVideoWriter *writer)
     if (!writer || !writer->rec_bin || writer->watchdog_id != 0)
         return;   // nothing to close, or a finalize is already in progress
 
-    writer->watchdog_id = g_timeout_add(WRITER_FINALIZE_TIMEOUT_MS, writer_finalize, writer);
+    writer->watchdog_id = g_timeout_add(WRITER_FINALIZE_TIMEOUT_MS, writer_watchdog, writer);
 
-    // Push EOS into the muxer -> the sink EOS probe runs writer_finalize. 
+    // Push EOS into the muxer -> the filesink's EOS message runs writer_teardown.
     // The caller should have already stopped feeding the writer (trip:
     // stopping; event: backlog re-blocked), so no data races the EOS.
     GstPad *bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
@@ -165,6 +294,7 @@ void writer_reset(RctGstVideoWriter *writer)
 {
     if (!writer)
         return;
+    writer_gate_shut(writer);
     if (writer->watchdog_id) {
         g_source_remove(writer->watchdog_id);
         writer->watchdog_id = 0;
@@ -178,4 +308,44 @@ void writer_reset(RctGstVideoWriter *writer)
     g_free(writer->file_path);
     writer->file_path = NULL;
     writer->on_done = NULL;
+}
+
+gboolean writer_handle_message(GstMessage *message)
+{
+    GstObject *src = GST_MESSAGE_SRC(message);
+    if (!src)
+        return FALSE;
+    RctGstVideoWriter *writer = g_object_get_qdata(G_OBJECT(src), writer_quark());
+    if (!writer)
+        return FALSE;
+
+    // A message from a bin this writer has already torn down (or replaced with
+    // the next file's) still belongs to it, but must not touch the current one.
+    guint generation = GPOINTER_TO_UINT(
+        g_object_get_qdata(G_OBJECT(src), writer_generation_quark()));
+    gboolean current = writer->rec_bin && generation == writer->generation;
+
+    switch (GST_MESSAGE_TYPE(message)) {
+        case GST_MESSAGE_ELEMENT: {
+            const GstStructure *s = gst_message_get_structure(message);
+            if (!gst_structure_has_name(s, "GstBinForwarded"))
+                return FALSE;
+            GstMessage *forwarded = NULL;
+            gst_structure_get(s, "message", GST_TYPE_MESSAGE, &forwarded, NULL);
+            if (forwarded && GST_MESSAGE_TYPE(forwarded) == GST_MESSAGE_EOS && current)
+                writer_teardown(writer, TRUE);
+            if (forwarded)
+                gst_message_unref(forwarded);
+            return TRUE;
+        }
+        case GST_MESSAGE_ERROR:
+            if (current) {
+                g_printerr("writer: recording to %s failed, dropping its branch\n",
+                           writer->file_path);
+                writer_teardown(writer, FALSE);
+            }
+            return TRUE;
+        default:
+            return FALSE;
+    }
 }

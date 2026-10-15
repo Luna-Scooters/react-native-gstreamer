@@ -3,23 +3,34 @@
 
 #include <gst/gst.h>
 
+typedef struct RctGstWriterGate RctGstWriterGate;
+
 // A reusable "encoded pad -> MP4 file" sink branch, shared by the trip and event recorders.
 typedef struct {
     GstElement *rec_bin;          // queue ! h264parse ! mp4mux ! filesink
     guint       watchdog_id;
+    GstPad     *gate_src;         // source pad carrying the gate probe (reffed)
+    gulong      gate_id;
+    RctGstWriterGate *gate;       // owned by the probe
+    guint       generation;       // bumped per file, to tell a stale bin's messages apart
     gchar      *file_path;
-    void      (*on_done)(gchar *path);  // onRecordingFinished / onEventSaved
+    // onRecordingFinished / onEventSaved. ok is FALSE when the branch failed
+    // with an error and the file may be incomplete.
+    void      (*on_done)(gchar *path, gboolean ok);
 } RctGstVideoWriter;
 
 // Build the muxing tail for `path`, bring it up in the pipeline and link `src`
-// into it. Caller owns `src` and `done`. 
+// into it. Caller owns `src` and `done`. A probe on `src` drops buffers once the
+// branch has failed or is being torn down, so the source sees GST_FLOW_OK rather
+// than an error; it is removed after on_done, which must block or release `src`.
+// After writer_reset it stays until the next writer_start or `src` is released.
 // Returns FALSE on failure.
-gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *));
+gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *, gboolean));
 
 // Finalize video writing with EOS:
 // - Push EOS so mp4mux writes the trailer
 // - Tear the branch down and
-// - Call on_done(path). 
+// - Call on_done(path, TRUE) once the filesink has written it all.
 // A 3s watchdog forces teardown if EOS never reaches the filesink.
 // The caller must have already stopped feeding the writer (trip:
 // tearing down; event: backlog re-blocked)
@@ -27,5 +38,11 @@ void writer_close(RctGstVideoWriter *writer);
 
 // Force-drop the branch synchronously (no EOS, no on_done)
 void writer_reset(RctGstVideoWriter *writer);
+
+// Bus watch (main loop): handle a message posted from inside a writer's branch.
+// The forwarded filesink EOS finalizes the file; an ERROR tears just that branch
+// down and fires on_done(path, FALSE). Returns TRUE if the message came from a
+// writer's branch, in which case it must not be treated as a pipeline-wide error.
+gboolean writer_handle_message(GstMessage *message);
 
 #endif // GSTREAMER_VIDEO_WRITER_H
