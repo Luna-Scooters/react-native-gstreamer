@@ -55,7 +55,7 @@ static void writer_tag_bin(RctGstVideoWriter *writer)
 {
     writer_tag(GST_OBJECT(writer->rec_bin), writer);
 
-    GstIterator *it = gst_bin_iterate_recurse(GST_BIN(writer->rec_bin));
+    g_autoptr(GstIterator) it = gst_bin_iterate_recurse(GST_BIN(writer->rec_bin));
     GValue item = G_VALUE_INIT;
     gboolean done = FALSE;
     while (!done) {
@@ -73,7 +73,6 @@ static void writer_tag_bin(RctGstVideoWriter *writer)
         }
     }
     g_value_unset(&item);
-    gst_iterator_free(it);
 }
 
 /* ---- source gate ---- */
@@ -129,11 +128,10 @@ static void writer_gate_remove(RctGstVideoWriter *writer)
 
 static void writer_gate_install(RctGstVideoWriter *writer, GstPad *src)
 {
-    GstElement *front = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recq");
+    g_autoptr(GstElement) front = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recq");
     RctGstWriterGate *gate = g_new0(RctGstWriterGate, 1);
     gate->open = TRUE;
     gate->front_src = gst_element_get_static_pad(front, "src");
-    gst_object_unref(front);
 
     writer->gate = gate;
     writer->gate_src = gst_object_ref(src);
@@ -168,11 +166,10 @@ static void writer_teardown(RctGstVideoWriter *writer, gboolean ok)
     // (trip) the now-unlinked source. on_done may start the next file, which
     // replaces the gate itself, so only remove the one this file installed.
     gulong gate_id = writer->gate_id;
-    gchar *path = writer->file_path;
+    g_autofree gchar *path = writer->file_path;
     writer->file_path = NULL;
     if (writer->on_done)
         writer->on_done(path, ok);
-    g_free(path);
     if (writer->gate_id == gate_id)
         writer_gate_remove(writer);
 }
@@ -195,9 +192,8 @@ static gboolean writer_watchdog(gpointer user_data)
 // block-held pad.
 static gpointer writer_push_eos(gpointer data)
 {
-    GstPad *bin_sink = (GstPad *)data;   // reffed by the caller
+    g_autoptr(GstPad) bin_sink = (GstPad *)data;   // reffed by the caller
     gst_pad_send_event(bin_sink, gst_event_new_eos());
-    gst_object_unref(bin_sink);
     return NULL;
 }
 
@@ -225,19 +221,17 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
     // MP4 keeps the file playable through crashes/forced teardown. We do NOT touch
     // PTS/DTS — mp4mux normalizes the timeline, and the encoder emits reordered
     // (B-frame) DTS that must stay monotonic.
-    gchar *desc = g_strdup_printf(
+    g_autofree gchar *desc = g_strdup_printf(
         "queue name=recq max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "h264parse ! mp4mux fragment-duration=1000 "
         "fragment-mode=first-moov-then-finalise ! "
         "filesink name=recsink async=false location=\"%s\"",
         path);
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     writer->rec_bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    g_free(desc);
     if (!writer->rec_bin) {
         g_printerr("writer_start: failed to build record bin: %s\n",
                    error ? error->message : "unknown");
-        if (error) g_error_free(error);
         g_free(writer->file_path);
         writer->file_path = NULL;
         return FALSE;
@@ -259,9 +253,8 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
 
     writer_gate_install(writer, src);
 
-    GstPad *bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
+    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
     GstPadLinkReturn link_ret = gst_pad_link(src, bin_sink);
-    gst_object_unref(bin_sink);
     if (link_ret != GST_PAD_LINK_OK) {
         g_printerr("writer_start: failed to link src -> writer (%d)\n", link_ret);
         writer_gate_remove(writer);   // never linked: nothing to shield
@@ -285,9 +278,9 @@ void writer_close(RctGstVideoWriter *writer)
     // Push EOS into the muxer -> the filesink's EOS message runs writer_teardown.
     // The caller should have already stopped feeding the writer (trip:
     // stopping; event: backlog re-blocked), so no data races the EOS.
-    GstPad *bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
-    GThread *eos_thread = g_thread_new("writer-eos", writer_push_eos, bin_sink);
-    g_thread_unref(eos_thread);   // detached; it unrefs bin_sink and self-cleans
+    // The thread takes bin_sink's ref; dropping ours detaches it.
+    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
+    g_autoptr(GThread) eos_thread = g_thread_new("writer-eos", writer_push_eos, g_steal_pointer(&bin_sink));
 }
 
 void writer_reset(RctGstVideoWriter *writer)
@@ -330,12 +323,10 @@ gboolean writer_handle_message(GstMessage *message)
             const GstStructure *s = gst_message_get_structure(message);
             if (!gst_structure_has_name(s, "GstBinForwarded"))
                 return FALSE;
-            GstMessage *forwarded = NULL;
+            g_autoptr(GstMessage) forwarded = NULL;
             gst_structure_get(s, "message", GST_TYPE_MESSAGE, &forwarded, NULL);
             if (forwarded && GST_MESSAGE_TYPE(forwarded) == GST_MESSAGE_EOS && current)
                 writer_teardown(writer, TRUE);
-            if (forwarded)
-                gst_message_unref(forwarded);
             return TRUE;
         }
         case GST_MESSAGE_ERROR:
