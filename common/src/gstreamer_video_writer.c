@@ -40,11 +40,9 @@ static gboolean writer_finalize(gpointer user_data)
         gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
     writer->rec_bin = NULL;
 
-    gchar *path = writer->file_path;
-    writer->file_path = NULL;
+    g_autofree gchar *path = g_steal_pointer(&writer->file_path);
     if (writer->on_done)
         writer->on_done(path);
-    g_free(path);
     return G_SOURCE_REMOVE;
 }
 
@@ -65,9 +63,8 @@ static GstPadProbeReturn writer_eos_probe(GstPad *pad, GstPadProbeInfo *info, gp
 // block-held pad.
 static gpointer writer_push_eos(gpointer data)
 {
-    GstPad *bin_sink = (GstPad *)data;   // reffed by the caller
+    g_autoptr(GstPad) bin_sink = (GstPad *)data;   // reffed by the caller
     gst_pad_send_event(bin_sink, gst_event_new_eos());
-    gst_object_unref(bin_sink);
     return NULL;
 }
 
@@ -92,25 +89,23 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
     // MP4 keeps the file playable through crashes/forced teardown. We do NOT touch
     // PTS/DTS — mp4mux normalizes the timeline, and the encoder emits reordered
     // (B-frame) DTS that must stay monotonic.
-    gchar *desc = g_strdup_printf(
+    g_autofree gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "h264parse ! mp4mux fragment-duration=1000 "
         "fragment-mode=first-moov-then-finalise ! "
         "filesink name=recsink async=false location=\"%s\"",
         path);
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     writer->rec_bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    g_free(desc);
     if (!writer->rec_bin) {
         g_printerr("writer_start: failed to build record bin: %s\n",
                    error ? error->message : "unknown");
-        if (error) g_error_free(error);
         g_free(writer->file_path);
         writer->file_path = NULL;
         return FALSE;
     }
 
-    GstElement *recsink = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recsink");
+    g_autoptr(GstElement) recsink = gst_bin_get_by_name(GST_BIN(writer->rec_bin), "recsink");
     if (!recsink) {
         g_printerr("writer_start: recsink not found in record bin\n");
         gst_object_unref(writer->rec_bin);
@@ -119,11 +114,9 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
         writer->file_path = NULL;
         return FALSE;
     }
-    GstPad *sinkpad = gst_element_get_static_pad(recsink, "sink");
+    g_autoptr(GstPad) sinkpad = gst_element_get_static_pad(recsink, "sink");
     gst_pad_add_probe(sinkpad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
                       writer_eos_probe, writer, NULL);
-    gst_object_unref(sinkpad);
-    gst_object_unref(recsink);
 
     // Bring the branch to PLAYING BEFORE linking, so the source only pushes into a
     // ready muxer (linking first can wedge a live streaming thread with FLUSHING).
@@ -131,9 +124,8 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
     gst_element_sync_state_with_parent(writer->rec_bin);
     gst_element_get_state(writer->rec_bin, NULL, NULL, WRITER_STATE_TIMEOUT);
 
-    GstPad *bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
+    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
     GstPadLinkReturn link_ret = gst_pad_link(src, bin_sink);
-    gst_object_unref(bin_sink);
     if (link_ret != GST_PAD_LINK_OK) {
         g_printerr("writer_start: failed to link src -> writer (%d)\n", link_ret);
         gst_element_set_state(writer->rec_bin, GST_STATE_NULL);

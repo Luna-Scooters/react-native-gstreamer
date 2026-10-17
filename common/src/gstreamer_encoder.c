@@ -38,13 +38,12 @@ static void configure_h264_encoder()
     if (!rct_gst_get_video_info(&width, &height, &fps))
         g_print("Failed to get video info, using fallback %dx%d @ %dfps\n", width, height, fps);
 
-    GstElement *venc = gst_bin_get_by_name(GST_BIN(enc.bin), "venc");
+    g_autoptr(GstElement) venc = gst_bin_get_by_name(GST_BIN(enc.bin), "venc");
     if (venc) {
         gdouble bits = (gdouble)width * height * fps * BITS_PER_PIXEL;
         gint bitrate_kbps = (gint)(bits / 1000.0);
         bitrate_kbps = CLAMP(bitrate_kbps, MIN_BITRATE_KBPS, MAX_BITRATE_KBPS);
         rct_gst_configure_h264_encoder(venc, fps, KEYFRAME_INTERVAL_SEC, bitrate_kbps);
-        gst_object_unref(venc);
     }
 }
 
@@ -70,12 +69,11 @@ static GstPadProbeReturn enc_pts_repair_probe(GstPad *pad, GstPadProbeInfo *info
     if (!pipeline)
         return GST_PAD_PROBE_OK;
 
-    GstClock *clock = gst_element_get_clock(pipeline);
+    g_autoptr(GstClock) clock = gst_element_get_clock(pipeline);
     if (!clock)
         return GST_PAD_PROBE_OK;
     GstClockTime now = gst_clock_get_time(clock);
     GstClockTime base = gst_element_get_base_time(pipeline);
-    gst_object_unref(clock);
     if (now == GST_CLOCK_TIME_NONE || base == GST_CLOCK_TIME_NONE || now < base)
         return GST_PAD_PROBE_OK;
 
@@ -135,7 +133,7 @@ static gboolean encoder_build(void)
         g_print("Shared encoder using camera stream info: %dx%d @ %dfps\n",
                 w, h, fps);
 
-    gchar *selected_encoder = rct_gst_find_h264_encoder();
+    g_autofree gchar *selected_encoder = rct_gst_find_h264_encoder();
     g_print("Shared encoder: %s\n", selected_encoder);
 
     // Offer only formats GStreamer's androidmedia plugin can actually map to an
@@ -152,26 +150,22 @@ static gboolean encoder_build(void)
     // this list against the selected encoder's own sink caps - pick whichever it
     // actually supports, so this doesn't need updating if another encoder type
     // shows up later.
-    GString *caps = g_string_new("video/x-raw");
+    g_autoptr(GString) caps = g_string_new("video/x-raw");
     g_string_append_printf(caps, ",format=(string){NV12,I420,YV12},framerate=%d/1", fps);
 
     // allow-not-linked keeps the tee running through the brief windows where a
     // consumer branch is being added or removed.
-    gchar *desc = g_strdup_printf(
+    g_autofree gchar *desc = g_strdup_printf(
         "queue max-size-buffers=0 max-size-bytes=0 max-size-time=3000000000 leaky=downstream ! "
         "videorate skip-to-first=true ! videoconvert ! %s ! "
         "%s name=venc ! h264parse config-interval=-1 ! "
         "video/x-h264,stream-format=avc,alignment=au ! tee name=enc-tee allow-not-linked=true",
         caps->str, selected_encoder);
 
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     enc.bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    g_string_free(caps, TRUE);
-    g_free(desc);
-    g_free(selected_encoder);
     if (!enc.bin) {
         g_printerr("encoder: branch build failed: %s\n", error ? error->message : "?");
-        if (error) g_error_free(error);
         return FALSE;
     }
 
@@ -185,11 +179,10 @@ static gboolean encoder_build(void)
     // enc_out_fixup_probe). enc-tee's sink is the single point every consumer's
     // frames pass through.
     if (enc.enc_tee) {
-        GstPad *tee_sink = gst_element_get_static_pad(enc.enc_tee, "sink");
+        g_autoptr(GstPad) tee_sink = gst_element_get_static_pad(enc.enc_tee, "sink");
         if (tee_sink) {
             gst_pad_add_probe(tee_sink, GST_PAD_PROBE_TYPE_BUFFER,
                               enc_out_fixup_probe, NULL, NULL);
-            gst_object_unref(tee_sink);
         }
     }
 
@@ -201,14 +194,12 @@ static gboolean encoder_build(void)
     gst_element_get_state(enc.bin, NULL, NULL, ENC_STATE_TIMEOUT);
     enc.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
     gst_pad_add_probe(enc.tee_pad, GST_PAD_PROBE_TYPE_BUFFER, enc_pts_repair_probe, NULL, NULL);
-    GstPad *bin_sink = gst_element_get_static_pad(enc.bin, "sink");
+    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(enc.bin, "sink");
     if (gst_pad_link(enc.tee_pad, bin_sink) != GST_PAD_LINK_OK) {
         g_printerr("encoder: failed to link video-tee -> encoder\n");
-        gst_object_unref(bin_sink);
         rct_gst_encoder_reset();
         return FALSE;
     }
-    gst_object_unref(bin_sink);
     return TRUE;
 }
 
@@ -216,7 +207,7 @@ GstPad *rct_gst_encoder_request_src_pad(void)
 {
     if (!encoder_build())
         return NULL;
-    GstPad *tee_src = gst_element_request_pad_simple(enc.enc_tee, "src_%u");
+    g_autoptr(GstPad) tee_src = gst_element_request_pad_simple(enc.enc_tee, "src_%u");
     if (!tee_src) {
         g_printerr("encoder: enc-tee gave no src pad\n");
         return NULL;
@@ -224,10 +215,8 @@ GstPad *rct_gst_encoder_request_src_pad(void)
     GstPad *ghost = gst_ghost_pad_new(NULL, tee_src);
     if (!ghost) {
         gst_element_release_request_pad(enc.enc_tee, tee_src);
-        gst_object_unref(tee_src);
         return NULL;
     }
-    gst_object_unref(tee_src);            // the ghost references the target now
     gst_pad_set_active(ghost, TRUE);
     gst_element_add_pad(enc.bin, ghost);  // sinks the floating ref; the bin owns it
     enc.refcount++;
@@ -238,17 +227,14 @@ void rct_gst_encoder_release_src_pad(GstPad *pad)
 {
     if (!pad)
         return;
-    GstPad *tee_src = NULL;
+    g_autoptr(GstPad) tee_src = NULL;
     if (GST_IS_GHOST_PAD(pad))
         tee_src = gst_ghost_pad_get_target(GST_GHOST_PAD(pad));
     gst_pad_set_active(pad, FALSE);
     if (enc.bin)
         gst_element_remove_pad(enc.bin, pad);  // drops the bin's ref
-    if (tee_src) {
-        if (enc.enc_tee)
-            gst_element_release_request_pad(enc.enc_tee, tee_src);
-        gst_object_unref(tee_src);
-    }
+    if (tee_src && enc.enc_tee)
+        gst_element_release_request_pad(enc.enc_tee, tee_src);
     gst_object_unref(pad);  // drops the caller's ref from request_src_pad
 
     // The src pads ARE the encoder's refcount: tear it down with the last one.
@@ -262,15 +248,13 @@ void rct_gst_encoder_force_keyframe(void)
 {
     if (!enc.enc_tee)
         return;
-    GstPad *sink = gst_element_get_static_pad(enc.enc_tee, "sink");
+    g_autoptr(GstPad) sink = gst_element_get_static_pad(enc.enc_tee, "sink");
     if (!sink)
         return;
-    GstPad *peer = gst_pad_get_peer(sink);
-    gst_object_unref(sink);
+    g_autoptr(GstPad) peer = gst_pad_get_peer(sink);
     if (peer) {
         gst_pad_send_event(peer, gst_video_event_new_upstream_force_key_unit(
             GST_CLOCK_TIME_NONE, TRUE, 0));
-        gst_object_unref(peer);
     }
 }
 
@@ -278,10 +262,9 @@ void rct_gst_encoder_reset(void)
 {
     if (enc.bin) {
         gst_element_set_state(enc.bin, GST_STATE_NULL);
-        GstObject *parent = gst_element_get_parent(enc.bin);
+        g_autoptr(GstObject) parent = gst_element_get_parent(enc.bin);
         if (parent) {
             gst_bin_remove(GST_BIN(parent), enc.bin);
-            gst_object_unref(parent);
         } else {
             gst_object_unref(enc.bin);
         }

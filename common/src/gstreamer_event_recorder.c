@@ -157,14 +157,12 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
         rct_gst_event_recorder_reset();
         return;
     }
-    GstPad *event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
+    g_autoptr(GstPad) event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
     if (gst_pad_link(eventRecorder.enc_tee_pad, event_queue_sink) != GST_PAD_LINK_OK) {
         g_printerr("event_recorder: failed to link enc-tee -> backlog queue\n");
-        gst_object_unref(event_queue_sink);
         rct_gst_event_recorder_reset();
         return;
     }
-    gst_object_unref(event_queue_sink);
 
     eventRecorder.fku_timer_id = g_timeout_add(EVR_FKU_MS, evr_force_keyframe, NULL);
     g_print("Event recorder armed (backlog %us, post %us)\n",

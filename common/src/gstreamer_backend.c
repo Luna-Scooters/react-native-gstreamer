@@ -183,11 +183,10 @@ gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps)
     if (!video_tee)
         return FALSE;
 
-    GstPad *sinkpad = gst_element_get_static_pad(video_tee, "sink");
+    g_autoptr(GstPad) sinkpad = gst_element_get_static_pad(video_tee, "sink");
     if (!sinkpad)
         return FALSE;
-    GstCaps *caps = gst_pad_get_current_caps(sinkpad);
-    gst_object_unref(sinkpad);
+    g_autoptr(GstCaps) caps = gst_pad_get_current_caps(sinkpad);
     if (!caps)
         return FALSE;
 
@@ -205,7 +204,6 @@ gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps)
         fps_n > 0 && fps_d > 0)
         *fps = fps_n / fps_d;
 
-    gst_caps_unref(caps);
     return ok;
 }
 
@@ -232,9 +230,8 @@ GstElement* create_audio_sink()
         g_printerr("Failed to link audio_level and audio_sink");
     
     // Creating pad and ghost pad
-    GstPad *levelPad = gst_element_get_static_pad(audio_level_element, "sink");
+    g_autoptr(GstPad) levelPad = gst_element_get_static_pad(audio_level_element, "sink");
     gst_element_add_pad(leveledsink, gst_ghost_pad_new("sink", levelPad));
-    gst_object_unref(GST_OBJECT(levelPad));
     
     return leveledsink;
 }
@@ -298,12 +295,11 @@ strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 
     GST_LOG_OBJECT(pad, "Stripping %zu-byte header prefix in rtpjpegdepay ", second_soi);
 
-    GstBuffer *stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
-                                                  second_soi, size - second_soi);
+    g_autoptr(GstBuffer) stripped = gst_buffer_copy_region(buffer, GST_BUFFER_COPY_ALL,
+                                                            second_soi, size - second_soi);
     if (!stripped)
         return GST_PAD_PROBE_OK;
     gst_mini_object_replace((GstMiniObject **)&info->data, (GstMiniObject *)stripped);
-    gst_buffer_unref(stripped);
 
     return GST_PAD_PROBE_OK;
 }
@@ -319,22 +315,14 @@ static void rct_gst_dump_pipeline(GstBin *bin, gint depth);
 // about to be pushed).
 static void rct_gst_link_decode_chain(GstCaps *caps)
 {
-    GstElement *jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
-    GstElement *tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
-    if (!jitterbuffer || !tee) {
-        if (jitterbuffer) gst_object_unref(jitterbuffer);
-        if (tee) gst_object_unref(tee);
+    g_autoptr(GstElement) jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
+    g_autoptr(GstElement) tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
+    if (!jitterbuffer || !tee)
         return;
-    }
 
-    GstPad *jb_src = gst_element_get_static_pad(jitterbuffer, "src");
-    gboolean already_built = gst_pad_is_linked(jb_src);
-    gst_object_unref(jb_src);
-    if (already_built) {
-        gst_object_unref(jitterbuffer);
-        gst_object_unref(tee);
-        return;
-    }
+    g_autoptr(GstPad) jb_src = gst_element_get_static_pad(jitterbuffer, "src");
+    if (gst_pad_is_linked(jb_src))
+        return;   // already built
 
     const GstStructure *s = caps ? gst_caps_get_structure(caps, 0) : NULL;
     const gchar *encoding = s ? gst_structure_get_string(s, "encoding-name") : NULL;
@@ -347,8 +335,8 @@ static void rct_gst_link_decode_chain(GstCaps *caps)
                         (!encoding && payload == 26);
     gboolean is_h264 = encoding && g_ascii_strcasecmp(encoding, "H264") == 0;
 
-    gchar *decoder;
-    gchar *chain_desc;
+    g_autofree gchar *decoder = NULL;
+    g_autofree gchar *chain_desc = NULL;
     if (is_jpeg) {
         decoder = rct_gst_find_jpeg_decoder();
         chain_desc = g_strdup_printf("rtpjpegdepay name=rtpjpegdepay0 ! jpegparse ! %s", decoder);
@@ -356,61 +344,43 @@ static void rct_gst_link_decode_chain(GstCaps *caps)
         decoder = rct_gst_find_h264_decoder();
         chain_desc = g_strdup_printf("rtph264depay ! h264parse ! %s", decoder);
     } else {
-        gchar *caps_str = caps ? gst_caps_to_string(caps) : NULL;
+        g_autofree gchar *caps_str = caps ? gst_caps_to_string(caps) : NULL;
         GST_ELEMENT_ERROR(pipeline, STREAM, CODEC_NOT_FOUND,
                            ("Unsupported RTSP video encoding"),
                            ("encoding-name=%s, caps=%s",
                             encoding ? encoding : "unknown",
                             caps_str ? caps_str : "none"));
-        g_free(caps_str);
-        gst_object_unref(jitterbuffer);
-        gst_object_unref(tee);
         return;
     }
-    g_free(decoder);
 
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     GstElement *chain = gst_parse_bin_from_description(chain_desc, TRUE, &error);
     g_print("Decode chain: %s\n", chain_desc);
-    g_free(chain_desc);
     if (error != NULL) {
         g_printerr("Failed to build decode chain: %s\n", error->message);
-        g_error_free(error);
-        gst_object_unref(jitterbuffer);
-        gst_object_unref(tee);
         return;
     }
 
     gst_bin_add(GST_BIN(pipeline), chain);
 
     if (is_jpeg) {
-        GstElement *depay_elem = gst_bin_get_by_name(GST_BIN(chain), "rtpjpegdepay0");
+        g_autoptr(GstElement) depay_elem = gst_bin_get_by_name(GST_BIN(chain), "rtpjpegdepay0");
         if (depay_elem) {
-            GstPad *depay_src = gst_element_get_static_pad(depay_elem, "src");
+            g_autoptr(GstPad) depay_src = gst_element_get_static_pad(depay_elem, "src");
             gst_pad_add_probe(depay_src, GST_PAD_PROBE_TYPE_BUFFER, strip_rtpjpeg_header, NULL, NULL);
-            gst_object_unref(depay_src);
-            gst_object_unref(depay_elem);
         }
     }
 
-    GstPad *chain_sink = gst_element_get_static_pad(chain, "sink");
-    jb_src = gst_element_get_static_pad(jitterbuffer, "src");
+    g_autoptr(GstPad) chain_sink = gst_element_get_static_pad(chain, "sink");
     if (GST_PAD_LINK_FAILED(gst_pad_link(jb_src, chain_sink)))
         g_printerr("Failed to link rtpjitterbuffer -> decode chain\n");
-    gst_object_unref(chain_sink);
-    gst_object_unref(jb_src);
 
-    GstPad *chain_src = gst_element_get_static_pad(chain, "src");
-    GstPad *tee_sink = gst_element_get_static_pad(tee, "sink");
+    g_autoptr(GstPad) chain_src = gst_element_get_static_pad(chain, "src");
+    g_autoptr(GstPad) tee_sink = gst_element_get_static_pad(tee, "sink");
     if (GST_PAD_LINK_FAILED(gst_pad_link(chain_src, tee_sink)))
         g_printerr("Failed to link decode chain -> tee\n");
-    gst_object_unref(chain_src);
-    gst_object_unref(tee_sink);
 
     gst_element_sync_state_with_parent(chain);
-
-    gst_object_unref(jitterbuffer);
-    gst_object_unref(tee);
 
     // The pipeline may already be PLAYING by the time this dynamic chain is
     // wired in (RTSP negotiation completes asynchronously), so the state-
@@ -440,17 +410,15 @@ static GstPadProbeReturn cb_rtsp_pad_caps_probe(GstPad *pad, GstPadProbeInfo *in
 static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_data)
 {
     (void)src; (void)user_data;
-    GstElement *jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
+    g_autoptr(GstElement) jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
     if (!jitterbuffer)
         return;
-    GstPad *sinkpad = gst_element_get_static_pad(jitterbuffer, "sink");
+    g_autoptr(GstPad) sinkpad = gst_element_get_static_pad(jitterbuffer, "sink");
     if (!gst_pad_is_linked(sinkpad)) {
         GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
         if (GST_PAD_LINK_FAILED(ret))
             g_printerr("pad-added: rtspsrc -> rtpjitterbuffer link failed (%d)\n", ret);
     }
-    gst_object_unref(sinkpad);
-    gst_object_unref(jitterbuffer);
 
     gst_pad_add_probe(new_pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
                        cb_rtsp_pad_caps_probe, NULL, NULL);
@@ -458,18 +426,17 @@ static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_da
 
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
 {
-    GstIterator *it = gst_bin_iterate_elements(bin);
-    GValue item = G_VALUE_INIT;
+    g_autoptr(GstIterator) it = gst_bin_iterate_elements(bin);
+    g_auto(GValue) item = G_VALUE_INIT;
     gboolean done = FALSE;
     while (!done) {
         switch (gst_iterator_next(it, &item)) {
             case GST_ITERATOR_OK: {
                 GstElement *el = GST_ELEMENT(g_value_get_object(&item));
-                gchar *name = gst_element_get_name(el);
+                g_autofree gchar *name = gst_element_get_name(el);
                 GstElementFactory *f = gst_element_get_factory(el);
                 g_print("[GST-PIPE] %*s%s [%s]\n", depth * 2, "",
                         name, f ? GST_OBJECT_NAME(f) : "?");
-                g_free(name);
                 if (GST_IS_BIN(el))
                     rct_gst_dump_pipeline(GST_BIN(el), depth + 1);
                 g_value_reset(&item);
@@ -483,22 +450,18 @@ static void rct_gst_dump_pipeline(GstBin *bin, gint depth)
                 break;
         }
     }
-    g_value_unset(&item);
-    gst_iterator_free(it);
 }
 
 static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
 {
-    GError *err;
-    gchar *debug_info;
+    g_autoptr(GError) err = NULL;
+    g_autofree gchar *debug_info = NULL;
     
     gst_message_parse_error(msg, &err, &debug_info);
     g_printerr("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
     if (rct_gst_get_configuration()->onElementError) {
         rct_gst_get_configuration()->onElementError(GST_OBJECT_NAME(msg->src), err->message, debug_info);
     }
-    g_clear_error(&err);
-    g_free(debug_info);
 #if defined(__APPLE__)
     dispatch_sync(dispatch_get_main_queue(), ^{
         rct_gst_set_pipeline_state(GST_STATE_NULL);
@@ -655,7 +618,7 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
 
-    GstElement *target = pipeline_ref();
+    g_autoptr(GstElement) target = pipeline_ref();
     if (!target) {
         g_printerr("Pipeline state change ignored : no pipeline\n");
         return GST_STATE_CHANGE_FAILURE;
@@ -664,14 +627,12 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
     if (rct_gst_is_recording() && state < GST_STATE_PLAYING) {
         g_print("Recording active - deferring state change until finalized\n");
         rct_gst_recorder_defer_state(state);
-        gst_object_unref(target);
         return GST_STATE_CHANGE_ASYNC;
     }
 
     GstStateChangeReturn validity = gst_element_set_state(target, state);
     g_print("Validity : %s\n", gst_element_state_change_return_get_name(validity));
 
-    gst_object_unref(target);
     return validity;
 }
 
@@ -753,11 +714,10 @@ void rct_gst_init(RctGstConfiguration *configuration)
 
     // Prepare pipeline. If not working, will display an error video signal
     const gchar *launch_command = (!rct_gst_get_configuration()->isDebugging) ? launch_command_app : launch_command_debug;
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
     GstElement *new_pipeline = gst_parse_launch(launch_command, &error);
     if (error != NULL) {
         g_printerr("Error creating pipeline: %s\n", error->message);
-        g_error_free(error);
         // A failed parse can still hand back a partial pipeline; don't keep it,
         // every other entry point treats a non-NULL pipeline as usable.
         if (new_pipeline)
@@ -775,11 +735,10 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // dangling (or even set-up) audio stream starves video over the shared
     // interleaved-TCP connection -> black screen. It also stops the camera from
     // sending PCMA packets the pipeline would only discard.
-    GstElement *src_element = gst_bin_get_by_name(GST_BIN(new_pipeline), "src");
+    g_autoptr(GstElement) src_element = gst_bin_get_by_name(GST_BIN(new_pipeline), "src");
     if (src_element) {
         g_signal_connect(src_element, "select-stream", G_CALLBACK(cb_select_stream), NULL);
         g_signal_connect(src_element, "pad-added", G_CALLBACK(cb_rtsp_pad_added), NULL);
-        gst_object_unref(src_element);
     }
 
     // Preparing bus
@@ -883,31 +842,26 @@ void apply_uri()
         return;
     }
 
-    GstElement *target = pipeline_ref();
+    g_autoptr(GstElement) target = pipeline_ref();
     if (!target) {
         g_printerr("URI not applied : no pipeline\n");
         return;
     }
-    gchar *uri = g_strdup(rct_gst_get_configuration()->uri);
+    g_autofree gchar *uri = g_strdup(rct_gst_get_configuration()->uri);
 
     rct_gst_set_pipeline_state(GST_STATE_READY);
 
     // Check if this is a rtspsrc pipeline or playbin pipeline
-    GstElement *src_element = gst_bin_get_by_name(GST_BIN(target), "src");
+    g_autoptr(GstElement) src_element = gst_bin_get_by_name(GST_BIN(target), "src");
     if (src_element) {
         // This is the rtspsrc pipeline - set location on the rtspsrc element
         g_object_set(src_element, "location", uri, NULL);
-        gst_object_unref(src_element);
     } else {
         // This is the playbin pipeline - set uri on the pipeline
         g_object_set(target, "uri", uri, NULL);
     }
 
-    gst_object_unref(target);
-
     if (rct_gst_get_configuration()->onUriChanged) {
         rct_gst_get_configuration()->onUriChanged(uri);
     }
-
-    g_free(uri);
 }
