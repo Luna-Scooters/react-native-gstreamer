@@ -16,7 +16,7 @@ static gchar *find_best_element(GstElementFactoryListType type,
                                 GstPadDirection direction,
                                 const gchar *fallback)
 {
-    GstCaps *caps = gst_caps_from_string(caps_str);
+    g_autoptr(GstCaps) caps = gst_caps_from_string(caps_str);
     GstElementFactoryListType tiers[2] = {
         type | GST_ELEMENT_FACTORY_TYPE_HARDWARE, // hardware first
         type,                                     // then software
@@ -32,7 +32,6 @@ static gchar *find_best_element(GstElementFactoryListType type,
         gst_plugin_feature_list_free(factories);
     }
 
-    gst_caps_unref(caps);
     return name ? name : g_strdup(fallback);
 }
 
@@ -84,7 +83,7 @@ void rct_gst_configure_h264_encoder(GstElement *encoder, gint fps,
         gint frames = keyframe_interval_sec * fps;
 
         // Each encoder exposes the GOP length under a different property name and unit
-        GstStructure *props = gst_structure_new(
+        g_autoptr(GstStructure) props = gst_structure_new(
             "keyframe-props",
             "i-frame-interval", G_TYPE_INT, keyframe_interval_sec,            // amcvidenc: seconds
             "key-int-max", G_TYPE_INT, frames,                                // x264enc: frames
@@ -102,7 +101,6 @@ void rct_gst_configure_h264_encoder(GstElement *encoder, gint fps,
             g_object_set_property(G_OBJECT(encoder), name,
                                   gst_structure_get_value(props, name));
         }
-        gst_structure_free(props);
 
         g_print("Encoder keyframe interval set to %ds (%d frames @ %dfps)\n",
                 keyframe_interval_sec, frames, fps);
