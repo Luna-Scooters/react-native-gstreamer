@@ -383,6 +383,7 @@ static void rct_gst_link_decode_chain(GstPad *src_pad, GstCaps *caps)
         g_printerr("Failed to link decode chain -> tee\n");
 
     gst_element_sync_state_with_parent(chain);
+    rct_gst_encoder_on_decode_chain();
 
     // The pipeline may already be PLAYING by the time this dynamic chain is
     // wired in (RTSP negotiation completes asynchronously), so the state-

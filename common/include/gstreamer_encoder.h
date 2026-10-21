@@ -36,6 +36,10 @@ GstPad *rct_gst_encoder_request_src_pad(void);
 // branch is torn down when the last pad is released
 void rct_gst_encoder_release_src_pad(GstPad *pad);
 
+// The decode chain is built: for an H.264 camera, start keeping its current GOP,
+// so a recording that joins mid-GOP opens on the last keyframe. Streaming thread.
+void rct_gst_encoder_on_decode_chain(void);
+
 // Ask the encoder for a keyframe
 void rct_gst_encoder_force_keyframe(void);
 
