@@ -308,21 +308,19 @@ strip_rtpjpeg_header(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 static void rct_gst_dump_pipeline(GstBin *bin, gint depth);
 
 // Builds the depay/parse/decode chain matching whichever codec the camera
-// actually negotiated, then wires it between the jitterbuffer and the tee.
+// actually negotiated, then wires it between rtspsrc's pad and the tee.
 // Deferred to here because the codec isn't known until RTSP SETUP completes
 // at runtime. `caps` must be the negotiated RTP caps (from the CAPS event,
 // not gst_pad_get_current_caps() — at pad-added time the pad may not have
 // its current caps set yet, even though the CAPS event carrying them is
 // about to be pushed).
-static void rct_gst_link_decode_chain(GstCaps *caps)
+static void rct_gst_link_decode_chain(GstPad *src_pad, GstCaps *caps)
 {
-    g_autoptr(GstElement) jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
     g_autoptr(GstElement) tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
-    if (!jitterbuffer || !tee)
+    if (!tee)
         return;
 
-    g_autoptr(GstPad) jb_src = gst_element_get_static_pad(jitterbuffer, "src");
-    if (gst_pad_is_linked(jb_src))
+    if (gst_pad_is_linked(src_pad))
         return;   // already built
 
     const GstStructure *s = caps ? gst_caps_get_structure(caps, 0) : NULL;
@@ -373,8 +371,8 @@ static void rct_gst_link_decode_chain(GstCaps *caps)
     }
 
     g_autoptr(GstPad) chain_sink = gst_element_get_static_pad(chain, "sink");
-    if (GST_PAD_LINK_FAILED(gst_pad_link(jb_src, chain_sink)))
-        g_printerr("Failed to link rtpjitterbuffer -> decode chain\n");
+    if (GST_PAD_LINK_FAILED(gst_pad_link(src_pad, chain_sink)))
+        g_printerr("Failed to link rtspsrc -> decode chain\n");
 
     g_autoptr(GstPad) chain_src = gst_element_get_static_pad(chain, "src");
     g_autoptr(GstPad) tee_sink = gst_element_get_static_pad(tee, "sink");
@@ -392,35 +390,28 @@ static void rct_gst_link_decode_chain(GstCaps *caps)
 
 // Catches the CAPS event on rtspsrc's dynamic pad — the authoritative point
 // at which the negotiated encoding (JPEG/H264) is known — and builds the
-// decode chain from it.
+// decode chain from it. The probe runs before the event looks for a peer, so
+// linking here means the CAPS event, and every buffer after it, already has
+// somewhere to go.
 static GstPadProbeReturn cb_rtsp_pad_caps_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
 {
-    (void)pad; (void)user_data;
+    (void)user_data;
     GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
     if (GST_EVENT_TYPE(event) != GST_EVENT_CAPS)
         return GST_PAD_PROBE_OK;
 
     GstCaps *caps;
     gst_event_parse_caps(event, &caps);
-    rct_gst_link_decode_chain(caps);
+    rct_gst_link_decode_chain(pad, caps);
 
     return GST_PAD_PROBE_REMOVE;
 }
 
-// Enforces link between sink and src (bug on iOS)
+// rtspsrc's pads are dynamic, so the decode chain is linked by hand once the
+// pad's caps arrive (gst_parse_launch's delayed linking is unreliable on iOS).
 static void cb_rtsp_pad_added(GstElement *src, GstPad *new_pad, gpointer user_data)
 {
     (void)src; (void)user_data;
-    g_autoptr(GstElement) jitterbuffer = gst_bin_get_by_name(GST_BIN(pipeline), "jitterbuffer");
-    if (!jitterbuffer)
-        return;
-    g_autoptr(GstPad) sinkpad = gst_element_get_static_pad(jitterbuffer, "sink");
-    if (!gst_pad_is_linked(sinkpad)) {
-        GstPadLinkReturn ret = gst_pad_link(new_pad, sinkpad);
-        if (GST_PAD_LINK_FAILED(ret))
-            g_printerr("pad-added: rtspsrc -> rtpjitterbuffer link failed (%d)\n", ret);
-    }
-
     gst_pad_add_probe(new_pad, GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM,
                        cb_rtsp_pad_caps_probe, NULL, NULL);
 }
@@ -707,13 +698,16 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // negotiates (JPEG or H264), which isn't known until RTSP SETUP completes,
     // so it's built dynamically in rct_gst_link_decode_chain() once rtspsrc's
     // pad appears. Only the codec-agnostic tail is static here.
+    //
+    // The display queue is bounded and leaky so a stalled sink drops stale
+    // frames instead of filling, blocking the tee (and with it the decoder and
+    // the encoder branch), then replaying the backlog at sync=false speed.
     const gchar *launch_command_app =
-        "rtspsrc is-live=true protocols=tcp latency=0 name=src "
+        "rtspsrc is-live=true protocols=tcp latency=0 drop-on-latency=false name=src "
         "do-retransmission=false tcp-timeout=2000000 "
         "teardown-timeout=2000000000 "
-        "! rtpjitterbuffer latency=500 drop-on-latency=true do-lost=true name=jitterbuffer "
         "tee name=video-tee "
-        "! queue "
+        "! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
         "! videoconvert ! video/x-raw,format=NV12 "
         "! vulkanupload ! vulkancolorconvert "
         "! vulkansink sync=false name=video-sink enable-last-sample=true";
