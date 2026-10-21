@@ -24,13 +24,15 @@ static const gint KEYFRAME_INTERVAL_SEC = 3;
 static const GstClockTime ENC_STATE_TIMEOUT = 500 * GST_MSECOND;
 
 typedef struct {
-    GstElement *bin;      // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee)
-    GstElement *enc_tee;  // borrowed (owned by bin) — internal tap point
-    GstPad     *tee_pad;  // video-tee src pad feeding the branch
-    int         refcount;
+    GstElement *bin;        // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee),
+                            // or the decode chain (borrowed) for an H.264 camera
+    GstElement *enc_tee;      // borrowed (owned by bin) — internal tap point
+    GstPad     *tee_pad;      // video-tee src pad feeding the branch; NULL for an H.264 camera
+    gboolean   camera_stream; // tapping the camera's own H.264: nothing to encode
+    int        refcount;
 } RctGstEncoder;
 
-RctGstEncoder enc = { NULL, NULL, NULL, 0 };
+RctGstEncoder enc = { NULL, NULL, NULL, FALSE, 0 };
 
 static void configure_h264_encoder()
 {
@@ -126,6 +128,20 @@ static gboolean encoder_build(void)
     if (!video_tee || !pipeline) {
         g_printerr("encoder: no video-tee available (pipeline not ready)\n");
         return FALSE;
+    }
+
+    // The camera already sends H.264: record it as it comes, from the tee the
+    // decode chain keeps ahead of the decoder. Consumers get ghost pads on the
+    // chain's bin, as they would on the encoder's.
+    GstElement *camera_tee = gst_bin_get_by_name(GST_BIN(pipeline), RCT_GST_CAMERA_H264_TEE);
+    if (camera_tee) {
+        enc.enc_tee = camera_tee;
+        enc.bin = GST_ELEMENT(gst_element_get_parent(camera_tee));
+        gst_object_unref(enc.enc_tee);  // borrowed; the decode chain owns it
+        gst_object_unref(enc.bin);      // borrowed; the pipeline owns the chain
+        enc.camera_stream = TRUE;
+        g_print("Shared encoder: none, recording the camera's own H.264\n");
+        return TRUE;
     }
 
     gint w, h, fps = FALLBACK_FPS;
@@ -246,7 +262,7 @@ void rct_gst_encoder_release_src_pad(GstPad *pad)
 
 void rct_gst_encoder_force_keyframe(void)
 {
-    if (!enc.enc_tee)
+    if (!enc.enc_tee || enc.camera_stream)
         return;
     g_autoptr(GstPad) sink = gst_element_get_static_pad(enc.enc_tee, "sink");
     if (!sink)
@@ -260,7 +276,8 @@ void rct_gst_encoder_force_keyframe(void)
 
 void rct_gst_encoder_reset(void)
 {
-    if (enc.bin) {
+    // For an H.264 camera the bin is the decode chain: not ours to take down.
+    if (enc.bin && !enc.camera_stream) {
         gst_element_set_state(enc.bin, GST_STATE_NULL);
         g_autoptr(GstObject) parent = gst_element_get_parent(enc.bin);
         if (parent) {
@@ -268,8 +285,9 @@ void rct_gst_encoder_reset(void)
         } else {
             gst_object_unref(enc.bin);
         }
-        enc.bin = NULL;
     }
+    enc.bin = NULL;
+    enc.camera_stream = FALSE;
     if (enc.tee_pad) {
         if (video_tee)
             gst_element_release_request_pad(video_tee, enc.tee_pad);

@@ -24,6 +24,9 @@
 
 #include <gst/gst.h>
 
+// Name of the tee the H.264 decode chain keeps ahead of its decoder.
+#define RCT_GST_CAMERA_H264_TEE "camera-h264-tee"
+
 // Request a src pad to tap the encoded H.264 stream. Builds the encoder on the
 // first request. The pad is a ghost exposed at the encoder BIN boundary; 
 // the caller owns the returned pad. NULL if the pipeline isn't ready.
