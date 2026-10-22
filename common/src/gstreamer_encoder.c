@@ -24,15 +24,12 @@ static const gint KEYFRAME_INTERVAL_SEC = 3;
 static const GstClockTime ENC_STATE_TIMEOUT = 500 * GST_MSECOND;
 
 typedef struct {
-    GstElement *bin;        // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee),
-                            // or the decode chain (borrowed) for an H.264 camera
-    GstElement *enc_tee;      // borrowed (owned by bin) — internal tap point
-    GstPad     *tee_pad;      // video-tee src pad feeding the branch; NULL for an H.264 camera
-    gboolean   camera_stream; // tapping the camera's own H.264: nothing to encode
-    int        refcount;
+    GstElement *bin;      // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee)
+    GstElement *enc_tee;  // borrowed (owned by bin) — internal tap point
+    GstPad     *tee_pad;  // video-tee src pad feeding the branch
 } RctGstEncoder;
 
-RctGstEncoder enc = { NULL, NULL, NULL, FALSE, 0 };
+RctGstEncoder enc = { NULL, NULL, NULL };
 
 static void configure_h264_encoder()
 {
@@ -121,68 +118,6 @@ static GstPadProbeReturn enc_out_fixup_probe(GstPad *pad, GstPadProbeInfo *info,
     return GST_PAD_PROBE_OK;
 }
 
-/* ---- the camera's GOP ---- */
-
-// Kept on the camera tee, so it goes with the decode chain.
-#define GOP_KEY "rct-gst-camera-gop"
-
-// The longest GOP kept: 10 s at 60 fps.
-static const guint GOP_MAX_FRAMES = 600;
-
-// On the camera tee's sink: keep the camera's current GOP, its frames since the
-// latest keyframe, so a recording that joins mid-GOP can open on that keyframe.
-// A new stream starts over. The tee hands each frame to its branches on the
-// thread it got it on, so this and gop_replay_probe never run at once.
-static GstPadProbeReturn gop_keep_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
-{
-    (void)pad;
-    GPtrArray *gop = user_data;
-    if (GST_PAD_PROBE_INFO_TYPE(info) & GST_PAD_PROBE_TYPE_BUFFER) {
-        GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-        gboolean keyframe = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-        // A GOP too long to keep is dropped; keeping starts again at the next keyframe.
-        if (keyframe || gop->len >= GOP_MAX_FRAMES)
-            g_ptr_array_set_size(gop, 0);
-        if (keyframe || gop->len > 0)
-            g_ptr_array_add(gop, gst_buffer_ref(buffer));
-        return GST_PAD_PROBE_OK;
-    }
-    switch (GST_EVENT_TYPE(GST_PAD_PROBE_INFO_EVENT(info))) {
-    case GST_EVENT_STREAM_START:
-    case GST_EVENT_SEGMENT:
-    case GST_EVENT_FLUSH_STOP:
-        g_ptr_array_set_size(gop, 0);
-        break;
-    default:
-        break;
-    }
-    return GST_PAD_PROBE_OK;
-}
-
-// On a recording's ghost pad, at its first frame once linked: replay the GOP up
-// to that frame - the frame itself is the last one kept - then let it through.
-// With no GOP kept yet (the camera's stream opened mid-GOP), drop frames until a
-// keyframe. Either way the recording opens on a keyframe.
-static GstPadProbeReturn gop_replay_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
-{
-    GPtrArray *gop = user_data;
-    g_autoptr(GstPad) peer = gst_pad_get_peer(pad);
-    if (!peer)
-        return GST_PAD_PROBE_OK;   // not linked yet: the frame goes nowhere
-
-    GstBuffer *live = GST_PAD_PROBE_INFO_BUFFER(info);
-    if (gop->len == 0 || g_ptr_array_index(gop, gop->len - 1) != live)
-        return GST_BUFFER_FLAG_IS_SET(live, GST_BUFFER_FLAG_DELTA_UNIT)
-            ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_REMOVE;
-
-    for (guint i = 0; i + 1 < gop->len; i++)
-        gst_pad_chain(peer, gst_buffer_ref(g_ptr_array_index(gop, i)));
-    if (gop->len > 1)
-        g_print("encoder: a recording joined mid-GOP; replayed %u frames from the last keyframe\n",
-                gop->len - 1);
-    return GST_PAD_PROBE_REMOVE;
-}
-
 static gboolean encoder_build(void)
 {
     if (enc.bin)
@@ -190,20 +125,6 @@ static gboolean encoder_build(void)
     if (!video_tee || !pipeline) {
         g_printerr("encoder: no video-tee available (pipeline not ready)\n");
         return FALSE;
-    }
-
-    // The camera already sends H.264: record it as it comes, from the tee the
-    // decode chain keeps ahead of the decoder. Consumers get ghost pads on the
-    // chain's bin, as they would on the encoder's.
-    GstElement *camera_tee = gst_bin_get_by_name(GST_BIN(pipeline), RCT_GST_CAMERA_H264_TEE);
-    if (camera_tee) {
-        enc.enc_tee = camera_tee;
-        enc.bin = GST_ELEMENT(gst_element_get_parent(camera_tee));
-        gst_object_unref(enc.enc_tee);  // borrowed; the decode chain owns it
-        gst_object_unref(enc.bin);      // borrowed; the pipeline owns the chain
-        enc.camera_stream = TRUE;
-        g_print("Shared encoder: none, recording the camera's own H.264\n");
-        return TRUE;
     }
 
     gint w, h, fps = FALLBACK_FPS;
@@ -281,66 +202,14 @@ static gboolean encoder_build(void)
     return TRUE;
 }
 
-GstPad *rct_gst_encoder_request_src_pad(void)
+GstElement *rct_gst_encoder_start(void)
 {
-    if (!encoder_build())
-        return NULL;
-    g_autoptr(GstPad) tee_src = gst_element_request_pad_simple(enc.enc_tee, "src_%u");
-    if (!tee_src) {
-        g_printerr("encoder: enc-tee gave no src pad\n");
-        return NULL;
-    }
-    GstPad *ghost = gst_ghost_pad_new(NULL, tee_src);
-    if (!ghost) {
-        gst_element_release_request_pad(enc.enc_tee, tee_src);
-        return NULL;
-    }
-    GPtrArray *gop = enc.camera_stream ? g_object_get_data(G_OBJECT(enc.enc_tee), GOP_KEY) : NULL;
-    if (gop)
-        gst_pad_add_probe(ghost, GST_PAD_PROBE_TYPE_BUFFER, gop_replay_probe, gop, NULL);
-    gst_pad_set_active(ghost, TRUE);
-    gst_element_add_pad(enc.bin, ghost);  // sinks the floating ref; the bin owns it
-    enc.refcount++;
-    return gst_object_ref(ghost);         // hand the caller its own ref
-}
-
-void rct_gst_encoder_release_src_pad(GstPad *pad)
-{
-    if (!pad)
-        return;
-    g_autoptr(GstPad) tee_src = NULL;
-    if (GST_IS_GHOST_PAD(pad))
-        tee_src = gst_ghost_pad_get_target(GST_GHOST_PAD(pad));
-    gst_pad_set_active(pad, FALSE);
-    if (enc.bin)
-        gst_element_remove_pad(enc.bin, pad);  // drops the bin's ref
-    if (tee_src && enc.enc_tee)
-        gst_element_release_request_pad(enc.enc_tee, tee_src);
-    gst_object_unref(pad);  // drops the caller's ref from request_src_pad
-
-    // The src pads ARE the encoder's refcount: tear it down with the last one.
-    if (enc.refcount > 0)
-        enc.refcount--;
-    if (enc.refcount == 0)
-        rct_gst_encoder_reset();
-}
-
-void rct_gst_encoder_on_decode_chain(void)
-{
-    g_autoptr(GstElement) camera_tee = gst_bin_get_by_name(GST_BIN(pipeline), RCT_GST_CAMERA_H264_TEE);
-    if (!camera_tee)
-        return;
-    GPtrArray *gop = g_ptr_array_new_with_free_func((GDestroyNotify)gst_buffer_unref);
-    g_object_set_data_full(G_OBJECT(camera_tee), GOP_KEY, gop, (GDestroyNotify)g_ptr_array_unref);
-    g_autoptr(GstPad) sink = gst_element_get_static_pad(camera_tee, "sink");
-    gst_pad_add_probe(sink,
-        GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM | GST_PAD_PROBE_TYPE_EVENT_FLUSH,
-        gop_keep_probe, gop, NULL);
+    return encoder_build() ? enc.enc_tee : NULL;
 }
 
 void rct_gst_encoder_force_keyframe(void)
 {
-    if (!enc.enc_tee || enc.camera_stream)
+    if (!enc.enc_tee)
         return;
     g_autoptr(GstPad) sink = gst_element_get_static_pad(enc.enc_tee, "sink");
     if (!sink)
@@ -354,8 +223,7 @@ void rct_gst_encoder_force_keyframe(void)
 
 void rct_gst_encoder_reset(void)
 {
-    // For an H.264 camera the bin is the decode chain: not ours to take down.
-    if (enc.bin && !enc.camera_stream) {
+    if (enc.bin) {
         gst_element_set_state(enc.bin, GST_STATE_NULL);
         g_autoptr(GstObject) parent = gst_element_get_parent(enc.bin);
         if (parent) {
@@ -363,9 +231,8 @@ void rct_gst_encoder_reset(void)
         } else {
             gst_object_unref(enc.bin);
         }
+        enc.bin = NULL;
     }
-    enc.bin = NULL;
-    enc.camera_stream = FALSE;
     if (enc.tee_pad) {
         if (video_tee)
             gst_element_release_request_pad(video_tee, enc.tee_pad);
@@ -373,7 +240,6 @@ void rct_gst_encoder_reset(void)
         enc.tee_pad = NULL;
     }
     enc.enc_tee = NULL;
-    enc.refcount = 0;
     enc_first_in_pts = GST_CLOCK_TIME_NONE;
     enc_out_checked = FALSE;
 }

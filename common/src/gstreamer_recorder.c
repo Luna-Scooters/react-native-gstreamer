@@ -4,14 +4,14 @@
 
 #include "gstreamer_recorder.h"
 #include "gstreamer_backend.h"
-#include "gstreamer_encoder.h"
+#include "gstreamer_h264_feed.h"
 #include "gstreamer_video_writer.h"
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
 
 typedef struct {
-    GstPad           *tee_pad;        // shared-encoder src pad (ghost) feeding the writer
+    GstPad           *tee_pad;        // shared-h264 src pad (ghost) feeding the writer
     GstState          deferred_state; // pipeline state postponed until finalize completes
     RctGstVideoWriter video_writer;   // owns queue ! h264parse ! mp4mux ! filesink
 } RctGstRecorder;
@@ -25,7 +25,7 @@ void rct_gst_recorder_reset(void)
     recorder.deferred_state = GST_STATE_VOID_PENDING;
     writer_reset(&recorder.video_writer);
     if (recorder.tee_pad) {
-        rct_gst_encoder_release_src_pad(recorder.tee_pad);
+        rct_gst_h264_release_src_pad(recorder.tee_pad);
         recorder.tee_pad = NULL;
     }
 }
@@ -69,10 +69,10 @@ void rct_gst_start_recording(const gchar *file_path)
         return;
     }
 
-    // Tap the shared encoder and hand it to the writer
-    recorder.tee_pad = rct_gst_encoder_request_src_pad();
+    // Tap the shared h264 feed and hand it to the writer
+    recorder.tee_pad = rct_gst_h264_request_src_pad();
     if (!recorder.tee_pad) {
-        g_printerr("start_recording: encoder gave no src pad\n");
+        g_printerr("start_recording: h264 feed gave no src pad\n");
         return;
     }
     if (!writer_start(&recorder.video_writer, recorder.tee_pad, file_path, recorder_on_done)) {

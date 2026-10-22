@@ -3,10 +3,10 @@
 //
 //  See gstreamer_event_recorder.h.
 //
-//  Backlog recording, the canonical GStreamer way. Off the shared encoder's
-//  enc-tee we keep a leaky queue whose SRC pad is held by a blocking probe:
+//  Backlog recording, the canonical GStreamer way. Off the H.264 feed
+//  we keep a leaky queue whose SRC pad is held by a blocking probe:
 //
-//    enc-tee ! queue name=evq (leaky, holds ~PRE s)   [src pad BLOCKED]
+//    h264 feed ! queue name=evq (leaky, holds ~PRE s)   [src pad BLOCKED]
 //
 //  Blocked, the queue can't push, so it just fills and leaks — always holding the
 //  most recent PRE seconds of encoded H.264. On a trigger we:
@@ -20,7 +20,7 @@
 
 #include "gstreamer_event_recorder.h"
 #include "gstreamer_backend.h"
-#include "gstreamer_encoder.h"
+#include "gstreamer_h264_feed.h"
 #include "gstreamer_video_writer.h"
 
 #include <glib/gstdio.h>
@@ -37,7 +37,7 @@ static const GstClockTime EVR_STATE_TIMEOUT    = 200 * GST_MSECOND;
 
 typedef struct {
     GstElement  *event_queue;       // persistent leaky backlog queue, NULL when disarmed
-    GstPad      *enc_tee_pad;       // src pad tapping the shared encoder, feeding evq
+    GstPad      *feed_pad;          // src pad tapping the H.264 feed, feeding evq
     GstPad      *event_queue_src;   // evq src pad — where we block / gate / push EOS
     gulong       block_id;          // block probe holding the backlog (armed-idle)
     gulong       gate_id;           // keyframe-gate probe active during a clip's start
@@ -134,14 +134,14 @@ static void evr_on_done(gchar *file_path, gboolean ok)
     evr_hold_backlog();
 }
 
-// Periodically ask the shared encoder for a keyframe so clips can start close to
+// Periodically ask the H.264 feed for a keyframe so clips can start close to
 // event-PRE.
 static gboolean evr_force_keyframe(gpointer user_data)
 {
     (void)user_data;
     if (!eventRecorder.event_queue)
         return G_SOURCE_REMOVE;
-    rct_gst_encoder_force_keyframe();
+    rct_gst_h264_force_keyframe();
     return G_SOURCE_CONTINUE;
 }
 
@@ -181,17 +181,17 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
     gst_element_sync_state_with_parent(eventRecorder.event_queue);
     gst_element_get_state(eventRecorder.event_queue, NULL, NULL, EVR_STATE_TIMEOUT);
 
-    // Link the shared encoder in only once evq is running (avoids a flushing
-    // race on the shared streaming thread).
-    eventRecorder.enc_tee_pad = rct_gst_encoder_request_src_pad();
-    if (!eventRecorder.enc_tee_pad) {
-        g_printerr("event_recorder: encoder gave no src pad\n");
+    // Link the H.264 feed in only once evq is running (avoids a flushing race on
+    // the shared streaming thread).
+    eventRecorder.feed_pad = rct_gst_h264_request_src_pad();
+    if (!eventRecorder.feed_pad) {
+        g_printerr("event_recorder: h264 feed gave no src pad\n");
         rct_gst_event_recorder_reset();
         return;
     }
     g_autoptr(GstPad) event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
-    if (gst_pad_link(eventRecorder.enc_tee_pad, event_queue_sink) != GST_PAD_LINK_OK) {
-        g_printerr("event_recorder: failed to link enc-tee -> backlog queue\n");
+    if (gst_pad_link(eventRecorder.feed_pad, event_queue_sink) != GST_PAD_LINK_OK) {
+        g_printerr("event_recorder: failed to link h264 feed -> backlog queue\n");
         rct_gst_event_recorder_reset();
         return;
     }
@@ -259,9 +259,9 @@ void rct_gst_event_recorder_reset(void)
         gst_object_unref(eventRecorder.event_queue_src);
         eventRecorder.event_queue_src = NULL;
     }
-    if (eventRecorder.enc_tee_pad) {
-        rct_gst_encoder_release_src_pad(eventRecorder.enc_tee_pad);
-        eventRecorder.enc_tee_pad = NULL;
+    if (eventRecorder.feed_pad) {
+        rct_gst_h264_release_src_pad(eventRecorder.feed_pad);
+        eventRecorder.feed_pad = NULL;
     }
     if (eventRecorder.event_queue) {
         gst_element_set_state(eventRecorder.event_queue, GST_STATE_NULL);

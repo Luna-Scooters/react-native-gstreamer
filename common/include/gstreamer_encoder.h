@@ -1,19 +1,18 @@
 //
 //  gstreamer_encoder.h
 //
-//  A single, ref-counted, continuous H.264 encode branch off the pipeline's
-//  video-tee, shared by every consumer (ride recorder, event recorder) so that
-//  only ONE hardware encode session is ever used — required because ride and
-//  event recording run at the same time and mobile encoders often allow one
+//  A single, continuous H.264 encode branch off the pipeline's video-tee, for a
+//  camera that doesn't send H.264 itself. It is shared by every consumer (ride
+//  recorder, event recorder) through the H.264 feed (gstreamer_h264_feed.h), so
+//  that only ONE hardware encode session is ever used — required because ride
+//  and event recording run at the same time and mobile encoders often allow one
 //  session.
 //
 //      video-tee ! queue ! videorate ! videoconvert ! <h264 enc>
 //                ! h264parse ! tee name=enc-tee
 //
-//  Consumers request_src_pad() to tap it (which builds the branch on the first
-//  request) and attach their own sink branch, then release_src_pad() when done.
-//  The branch is ref-counted by its outstanding src pads and torn down when the
-//  last one is released.
+//  The feed starts the branch for its first consumer and resets it when the
+//  last one is done.
 //
 //  PTS repair (NONE -> running time, for broken-MJPEG frames) happens here at
 //  the encoder input; consumers still rebase their own output to start at 0.
@@ -24,26 +23,14 @@
 
 #include <gst/gst.h>
 
-// Name of the tee the H.264 decode chain keeps ahead of its decoder.
-#define RCT_GST_CAMERA_H264_TEE "camera-h264-tee"
-
-// Request a src pad to tap the encoded H.264 stream. Builds the encoder on the
-// first request. The pad is a ghost exposed at the encoder BIN boundary; 
-// the caller owns the returned pad. NULL if the pipeline isn't ready.
-GstPad *rct_gst_encoder_request_src_pad(void);
-
-// Release a src pad from request_src_pad. Also drops the encoder's refcount; the
-// branch is torn down when the last pad is released
-void rct_gst_encoder_release_src_pad(GstPad *pad);
-
-// The decode chain is built: for an H.264 camera, start keeping its current GOP,
-// so a recording that joins mid-GOP opens on the last keyframe. Streaming thread.
-void rct_gst_encoder_on_decode_chain(void);
+// Build the encode branch if it isn't running and return its enc-tee, borrowed
+// (the branch owns it). NULL if the pipeline isn't ready.
+GstElement *rct_gst_encoder_start(void);
 
 // Ask the encoder for a keyframe
 void rct_gst_encoder_force_keyframe(void);
 
-// Force teardown regardless of refcount (pipeline re-init / terminate).
+// Tear the branch down.
 void rct_gst_encoder_reset(void);
 
 #endif /* gstreamer_encoder_h */
