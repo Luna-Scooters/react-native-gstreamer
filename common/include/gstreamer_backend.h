@@ -45,7 +45,6 @@ RctGstConfiguration *rct_gst_get_configuration();
 RctGstAudioLevel *rct_gst_get_audio_level();
 
 // Setters
-void rct_gst_set_drawable_surface(guintptr _drawableSurface);
 void rct_gst_set_uri(gchar* _uri);
 void rct_gst_set_audio_level_refresh_rate(gint rct_gst_set_audio_level_refresh_rate);
 void rct_gst_set_debugging(gboolean is_debugging);
@@ -59,10 +58,9 @@ void rct_gst_terminate();
 gchar *rct_gst_get_info();
 void apply_uri();
 
-GstSample *rct_gst_pull_last_sample(void);
-
 gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps);
 
+#include "gstreamer_display.h"
 #include "gstreamer_h264_feed.h"
 #include "gstreamer_recorder.h"
 #include "gstreamer_event_recorder.h"
