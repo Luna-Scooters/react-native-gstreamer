@@ -27,10 +27,9 @@ typedef struct {
     GstElement *bin;      // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee)
     GstElement *enc_tee;  // borrowed (owned by bin) — internal tap point
     GstPad     *tee_pad;  // video-tee src pad feeding the branch
-    int         refcount;
 } RctGstEncoder;
 
-RctGstEncoder enc = { NULL, NULL, NULL, 0 };
+RctGstEncoder enc = { NULL, NULL, NULL };
 
 static void configure_h264_encoder()
 {
@@ -203,45 +202,9 @@ static gboolean encoder_build(void)
     return TRUE;
 }
 
-GstPad *rct_gst_encoder_request_src_pad(void)
+GstElement *rct_gst_encoder_start(void)
 {
-    if (!encoder_build())
-        return NULL;
-    g_autoptr(GstPad) tee_src = gst_element_request_pad_simple(enc.enc_tee, "src_%u");
-    if (!tee_src) {
-        g_printerr("encoder: enc-tee gave no src pad\n");
-        return NULL;
-    }
-    GstPad *ghost = gst_ghost_pad_new(NULL, tee_src);
-    if (!ghost) {
-        gst_element_release_request_pad(enc.enc_tee, tee_src);
-        return NULL;
-    }
-    gst_pad_set_active(ghost, TRUE);
-    gst_element_add_pad(enc.bin, ghost);  // sinks the floating ref; the bin owns it
-    enc.refcount++;
-    return gst_object_ref(ghost);         // hand the caller its own ref
-}
-
-void rct_gst_encoder_release_src_pad(GstPad *pad)
-{
-    if (!pad)
-        return;
-    g_autoptr(GstPad) tee_src = NULL;
-    if (GST_IS_GHOST_PAD(pad))
-        tee_src = gst_ghost_pad_get_target(GST_GHOST_PAD(pad));
-    gst_pad_set_active(pad, FALSE);
-    if (enc.bin)
-        gst_element_remove_pad(enc.bin, pad);  // drops the bin's ref
-    if (tee_src && enc.enc_tee)
-        gst_element_release_request_pad(enc.enc_tee, tee_src);
-    gst_object_unref(pad);  // drops the caller's ref from request_src_pad
-
-    // The src pads ARE the encoder's refcount: tear it down with the last one.
-    if (enc.refcount > 0)
-        enc.refcount--;
-    if (enc.refcount == 0)
-        rct_gst_encoder_reset();
+    return encoder_build() ? enc.enc_tee : NULL;
 }
 
 void rct_gst_encoder_force_keyframe(void)
@@ -277,7 +240,6 @@ void rct_gst_encoder_reset(void)
         enc.tee_pad = NULL;
     }
     enc.enc_tee = NULL;
-    enc.refcount = 0;
     enc_first_in_pts = GST_CLOCK_TIME_NONE;
     enc_out_checked = FALSE;
 }

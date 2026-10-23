@@ -340,8 +340,11 @@ static void rct_gst_link_decode_chain(GstPad *src_pad, GstCaps *caps)
         decoder = rct_gst_find_jpeg_decoder();
         chain_desc = g_strdup_printf("rtpjpegdepay name=rtpjpegdepay0 ! jpegparse ! %s", decoder);
     } else if (is_h264) {
+        // If the camera stream is already H264, there's no need to decode it for recording.
         decoder = rct_gst_find_h264_decoder();
-        chain_desc = g_strdup_printf("rtph264depay ! h264parse ! %s", decoder);
+        chain_desc = g_strdup_printf(
+            "rtph264depay ! h264parse config-interval=-1 ! "
+            "tee name=" RCT_GST_CAMERA_H264_TEE " allow-not-linked=true ! %s", decoder);
     } else {
         g_autofree gchar *caps_str = caps ? gst_caps_to_string(caps) : NULL;
         GST_ELEMENT_ERROR(pipeline, STREAM, CODEC_NOT_FOUND,
@@ -380,6 +383,7 @@ static void rct_gst_link_decode_chain(GstPad *src_pad, GstCaps *caps)
         g_printerr("Failed to link decode chain -> tee\n");
 
     gst_element_sync_state_with_parent(chain);
+    rct_gst_h264_on_decode_chain();
 
     // The pipeline may already be PLAYING by the time this dynamic chain is
     // wired in (RTSP negotiation completes asynchronously), so the state-
@@ -651,7 +655,7 @@ static void destroy_pipeline(void)
 {
     rct_gst_recorder_reset();
     rct_gst_event_recorder_reset();
-    rct_gst_encoder_reset();
+    rct_gst_h264_reset();
 
     if (bus_watch_id) {
         g_source_remove(bus_watch_id);
