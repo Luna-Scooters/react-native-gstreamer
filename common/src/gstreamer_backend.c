@@ -376,15 +376,17 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     g_autofree gchar *debug_info = NULL;
     
     gst_message_parse_error(msg, &err, &debug_info);
-    g_printerr("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
-    if (rct_gst_get_configuration()->onElementError) {
-        rct_gst_get_configuration()->onElementError(GST_OBJECT_NAME(msg->src), err->message, debug_info);
-    }
+    g_printerr("Error received from element %s: %s (%s)\n", GST_OBJECT_NAME(msg->src), err->message,
+               debug_info ? debug_info : "no debug info");
 
     // A recording branch failing only loses that file: the writer drops its
     // branch, and the live stream (and any other recording) keeps running.
     if (writer_handle_message(msg))
         return;
+
+    if (rct_gst_get_configuration()->onElementError) {
+        rct_gst_get_configuration()->onElementError(GST_OBJECT_NAME(msg->src), err->message, debug_info);
+    }
 
 #if defined(__APPLE__)
     dispatch_sync(dispatch_get_main_queue(), ^{
