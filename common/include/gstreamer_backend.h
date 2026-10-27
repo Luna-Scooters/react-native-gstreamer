@@ -27,6 +27,7 @@ typedef struct
     gint *audioLevelRefreshRate;                                    // Time in ms between each call of onVolumeChanged
     guintptr initialDrawableSurface;                                // Pointer to drawable surface
     gboolean isDebugging;                                           // Loads debugging pipeline
+    gboolean mirrorImage;                                           // Mirror the video image
     
     // Callbacks
     void(*onInit)(void);                                            // Called when the player is ready
@@ -48,6 +49,7 @@ RctGstAudioLevel *rct_gst_get_audio_level();
 void rct_gst_set_uri(gchar* _uri);
 void rct_gst_set_audio_level_refresh_rate(gint rct_gst_set_audio_level_refresh_rate);
 void rct_gst_set_debugging(gboolean is_debugging);
+void rct_gst_set_mirror_image(gboolean mirror_image);
 
 // Other
 GstStateChangeReturn rct_gst_set_pipeline_state(GstState state);

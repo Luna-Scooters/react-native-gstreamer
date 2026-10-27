@@ -237,3 +237,16 @@ void rct_gst_display_reset(GstElement *target)
 
     video_overlay = NULL;
 }
+
+void apply_mirror_image(GstElement *target)
+{
+    g_autoptr(GstElement) videoflip = gst_bin_get_by_name(GST_BIN(target), "display-flip");
+    if (!videoflip) {
+        g_printerr("Mirror image not applied :  videoflip element not found\n");
+        return;
+    }
+
+    GstVideoOrientationMethod direction = rct_gst_get_configuration()->mirrorImage
+        ? GST_VIDEO_ORIENTATION_HORIZ : GST_VIDEO_ORIENTATION_IDENTITY;
+    g_object_set(videoflip, "video-direction", direction, NULL);
+}

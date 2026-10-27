@@ -28,6 +28,7 @@
 // then replaying the backlog at sync=false speed.
 #define RCT_GST_DISPLAY_BRANCH                                                  \
     "queue name=display-queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream " \
+    "! videoflip name=display-flip "                                            \
     "! videoconvert ! video/x-raw,format=NV12 "                                 \
     "! vulkanupload ! vulkancolorconvert "                                      \
     "! vulkansink sync=false name=" RCT_GST_VIDEO_SINK " enable-last-sample=true"
@@ -50,5 +51,8 @@ GstStateChangeReturn rct_gst_display_set_pipeline_state(GstElement *pipeline, Gs
 // Drop the video sink, once `pipeline` is in NULL and before its last ref goes.
 // The surface is kept for the next pipeline.
 void rct_gst_display_reset(GstElement *pipeline);
+
+// Apply the mirror image setting to the videoflip element in `pipeline`'s display branch.
+void apply_mirror_image(GstElement *pipeline);
 
 #endif /* gstreamer_display_h */

@@ -168,6 +168,7 @@ export default class GstPlayer extends React.Component {
                 audioLevelRefreshRate={this.props.audioLevelRefreshRate !== undefined ? this.props.audioLevelRefreshRate : 100}
                 isDebugging={this.props.isDebugging !== undefined ? this.props.isDebugging : false}
                 captureFrames={this.props.captureFrames !== undefined ? this.props.captureFrames : false}
+                mirrorImage={this.props.mirrorImage !== undefined ? this.props.mirrorImage : false}
 
                 onPlayerInit={this.onPlayerInit.bind(this)}
                 onStateChanged={this.onStateChanged.bind(this)}

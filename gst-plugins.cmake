@@ -9,6 +9,7 @@ set(GSTREAMER_PLUGINS
     coreelements            # tee, queue, capsfilter, filesink
     rtsp rtpmanager rtp     # rtspsrc, rtpjitterbuffer, rtp{jpeg,h264}depay
     videoconvertscale videorate
+    videofilter             # videoflip
     jpegformat jpeg         # jpegparse, jpegdec
     videoparsersbad         # h264parse
     isomp4                  # mp4mux

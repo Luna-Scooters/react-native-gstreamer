@@ -46,6 +46,7 @@ RctGstConfiguration *rct_gst_get_configuration()
         *(configuration->audioLevelRefreshRate) = 100;
         configuration->uri = NULL;
         configuration->isDebugging = FALSE;
+        configuration->mirrorImage = FALSE;
         
         configuration->onElementError = NULL;
         configuration->onStateChanged = NULL;
@@ -107,6 +108,18 @@ void rct_gst_set_debugging(gboolean is_debugging)
 {
     rct_gst_get_configuration()->isDebugging = is_debugging;
     // TODO : Recreate pipeline...
+}
+
+static GstElement *pipeline_ref(void);
+
+void rct_gst_set_mirror_image(gboolean mirror_image)
+{
+    rct_gst_get_configuration()->mirrorImage = mirror_image;
+
+    // No pipeline yet: rct_gst_init applies it once there is one.
+    g_autoptr(GstElement) target = pipeline_ref();
+    if (target)
+        apply_mirror_image(target);
 }
 
 /**********************
@@ -670,6 +683,8 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // Apply URI
     if (!rct_gst_get_configuration()->isDebugging)
         apply_uri();
+
+    apply_mirror_image(new_pipeline);
     
     if (rct_gst_get_configuration()->onInit) {
         rct_gst_get_configuration()->onInit();

@@ -55,6 +55,7 @@ public class RCTGstPlayerController
   private native void
   nativeRCTGstSetAudioLevelRefreshRate(int audioLevelRefreshRate);
   private native void nativeRCTGstSetDebugging(boolean isDebugging);
+  private native void nativeRCTGstSetMirrorImage(boolean mirrorImage);
 
   private native void nativeRCTGstStartRecording(String path, int videoEventPreLength, int videoEventPostLength);
   private native void nativeRCTGstStopRecording();
@@ -318,6 +319,10 @@ public class RCTGstPlayerController
 
   void setRctGstDebugging(boolean isDebugging) {
     nativeRCTGstSetDebugging(isDebugging);
+  }
+
+  void setRctGstMirrorImage(boolean mirrorImage) {
+    nativeRCTGstSetMirrorImage(mirrorImage);
   }
 
   void setCaptureFrames(boolean enable) {

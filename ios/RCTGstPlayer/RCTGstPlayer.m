@@ -41,6 +41,10 @@ RCT_CUSTOM_VIEW_PROPERTY(captureFrames, BOOL, RCTGstPlayerController)
     (void)view;
     [self->playerController setCaptureFrames:[RCTConvert BOOL:json]];
 }
+RCT_CUSTOM_VIEW_PROPERTY(mirrorImage, BOOL, RCTGstPlayerController)
+{
+    rct_gst_set_mirror_image([RCTConvert BOOL:json]);
+}
 
 // Shared events
 RCT_EXPORT_VIEW_PROPERTY(onPlayerInit, RCTBubblingEventBlock)

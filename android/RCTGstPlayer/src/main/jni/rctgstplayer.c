@@ -135,6 +135,13 @@ static void native_rct_gst_set_debugging(JNIEnv* env, jobject thiz, jboolean is_
     rct_gst_set_debugging(is_debugging);
 }
 
+static void native_rct_gst_set_mirror_image(JNIEnv* env, jobject thiz, jboolean mirror_image)
+{
+    (void)env;
+    (void)thiz;
+    rct_gst_set_mirror_image(mirror_image);
+}
+
 static void native_rct_gst_start_recording(JNIEnv* env, jobject thiz, jstring path_j, jint video_event_pre_length, jint video_event_post_length)
 {
     (void)thiz;
@@ -301,6 +308,7 @@ static JNINativeMethod native_methods[] = {
         { "nativeRCTGstSetUri", "(Ljava/lang/String;)V", (void *) native_rct_gst_set_uri },
         { "nativeRCTGstSetAudioLevelRefreshRate", "(I)V", (void *) native_rct_gst_set_audio_level_refresh_rate },
         { "nativeRCTGstSetDebugging", "(Z)V", (void *) native_rct_gst_set_debugging },
+        { "nativeRCTGstSetMirrorImage", "(Z)V", (void *) native_rct_gst_set_mirror_image },
 
         { "nativeRCTGstStartRecording", "(Ljava/lang/String;II)V", (void *) native_rct_gst_start_recording },
         { "nativeRCTGstStopRecording", "()V", (void *) native_rct_gst_stop_recording },

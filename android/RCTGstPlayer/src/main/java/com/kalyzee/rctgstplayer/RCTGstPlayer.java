@@ -65,6 +65,11 @@ public class RCTGstPlayer extends SimpleViewManager {
         this.playerController.setCaptureFrames(captureFrames);
     }
 
+    @ReactProp(name = "mirrorImage", defaultBoolean = false)
+    public void setMirrorImage(View controllerView, boolean mirrorImage) {
+        this.playerController.setRctGstMirrorImage(mirrorImage);
+    }
+
     // Methods
     @Override
     public void receiveCommand(View view, int commandType, @Nullable ReadableArray args) {
