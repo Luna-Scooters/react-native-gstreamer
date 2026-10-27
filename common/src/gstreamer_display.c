@@ -188,6 +188,19 @@ GstSample *rct_gst_pull_last_sample(void)
 GstBusSyncReply rct_gst_display_bus_sync(GstBus *bus, GstMessage *message, gpointer user_data)
 {
     (void)bus; (void)user_data;
+
+    // display-queue's streaming thread runs the display branch down to the
+    // sink's present. A task posts ENTER from its own thread as it starts.
+    if (GST_MESSAGE_TYPE(message) == GST_MESSAGE_STREAM_STATUS) {
+        GstStreamStatusType type;
+        GstElement *owner;
+        gst_message_parse_stream_status(message, &type, &owner);
+        if (type == GST_STREAM_STATUS_TYPE_ENTER && g_strcmp0(GST_ELEMENT_NAME(owner), "display-queue") == 0
+            && rct_gst_get_configuration()->onDisplayThreadEnter)
+            rct_gst_get_configuration()->onDisplayThreadEnter();
+        return GST_BUS_PASS;
+    }
+
     if(!gst_is_video_overlay_prepare_window_handle_message(message))
         return GST_BUS_PASS;
 

@@ -38,6 +38,7 @@ typedef struct
                           gchar *debug_info);
     void(*onRecordingFinished)();                                   // Called when a recording file is finalized
     void(*onEventSaved)(gchar *file_path);                          // Called when an event clip is written
+    void(*onDisplayThreadEnter)(void);                              // Called on the thread that draws the video, before its first frame
 } RctGstConfiguration;
 
 // Getters

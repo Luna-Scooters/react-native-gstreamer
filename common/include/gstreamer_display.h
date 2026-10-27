@@ -40,7 +40,8 @@ void rct_gst_set_drawable_surface(guintptr drawable_surface);
 GstSample *rct_gst_pull_last_sample(void);
 
 // The pipeline bus's sync handler: hands the sink the surface when it asks for
-// a window. Streaming thread.
+// a window, and calls onDisplayThreadEnter on the thread that draws. Streaming
+// thread.
 GstBusSyncReply rct_gst_display_bus_sync(GstBus *bus, GstMessage *message, gpointer user_data);
 
 // The pipeline to `state`. Below PAUSED, the display goes down first; without a
