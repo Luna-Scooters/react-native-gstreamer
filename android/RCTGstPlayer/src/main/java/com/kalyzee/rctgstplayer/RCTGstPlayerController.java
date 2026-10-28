@@ -258,6 +258,15 @@ public class RCTGstPlayerController
   @Override
   public void surfaceDestroyed(SurfaceHolder holder) {
     stopCaptureThread();
+
+    // Nothing may draw into the surface once this returns, while the pipeline
+    // outlives it: the app going to background mid-ride, or React Native
+    // removing the view before onDropViewInstance terminates the player. The
+    // video sink stops here, the rest - a recording - runs on, and
+    // surfaceChanged brings it back with the next surface.
+    if (isInited) {
+      nativeRCTGstSetDrawableSurface(null);
+    }
   }
 
   // Called from RCTGstPlayer.onDropViewInstance, i.e. when the JS component

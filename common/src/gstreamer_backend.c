@@ -25,25 +25,14 @@ GMainLoop *main_loop;
 guint bus_watch_id;
 GstBus *bus;
 
-// Serializes video_sink between the main thread (which swaps it on surface
-// changes and drops it on re-init / terminate) and the image-capture thread
-// (rct_gst_pull_last_sample). All backend state lives in these file globals and
-// is shared by every player instance, so a new instance's rct_gst_init can race
-// an old instance's still-running capture loop.
-static GMutex video_sink_lock;
-
 static GMutex pipeline_lock;
 
-// Video
-guintptr drawable_surface;
-GstVideoOverlay* video_overlay;
 static gchar *last_applied_uri = NULL;
 
 // Audio
 GstElement* audio_level_element;
 
 // Sinks
-GstElement *video_sink;
 GstElement *audio_sink;
 
 GstElement *video_tee; // Recording pipeline will attached here
@@ -123,60 +112,6 @@ void rct_gst_set_debugging(gboolean is_debugging)
 /**********************
  VIDEO HANDLING METHODS
  *********************/
-void rct_gst_set_drawable_surface(guintptr _drawableSurface)
-{
-    // Unlike the GL window, vulkansink's Android window refuses to be repointed
-    // at a different native window once it holds one ("View changes are not
-    // implemented"), so a surface that is destroyed and recreated - the app
-    // going to background, a rotation - only renders again once the pipeline
-    // itself is re-created. Log it, otherwise the symptom is a silent black view.
-    if (pipeline && drawable_surface && _drawableSurface != drawable_surface) {
-        g_printerr("Drawable surface changed under the vulkan sink; "
-                   "re-create the pipeline to render into the new one\n");
-    }
-
-    drawable_surface = _drawableSurface;
-    
-    if(pipeline)
-    {
-        // gst_bin_get_by_name returns a NEW ref each call (this runs on every
-        // surface change), so drop the one we already hold before replacing it.
-        g_mutex_lock(&video_sink_lock);
-        GstElement *previous_sink = video_sink;
-        video_sink = gst_bin_get_by_name(GST_BIN(pipeline), "video-sink");
-        g_mutex_unlock(&video_sink_lock);
-        if (previous_sink)
-            gst_object_unref(previous_sink);
-        
-        // Configure the video sink if we have one
-        if (video_sink) {
-            // Configure for lower latency if it's not in debug mode
-            if (!rct_gst_get_configuration()->isDebugging) {
-                g_object_set(G_OBJECT(video_sink),
-                            "qos", TRUE,
-                            "max-lateness", 20 * GST_MSECOND,
-                            NULL);
-            }
-
-            // Set up video overlay if supported
-            if (GST_IS_VIDEO_OVERLAY(video_sink)) {
-                video_overlay = GST_VIDEO_OVERLAY(video_sink);
-                gst_video_overlay_prepare_window_handle(video_overlay);
-            }
-        }
-    }
-}
-
-GstSample *rct_gst_pull_last_sample(void)
-{
-    g_mutex_lock(&video_sink_lock);
-    GstSample *sample = NULL;
-    if (video_sink)
-        g_object_get(video_sink, "last-sample", &sample, NULL);
-    g_mutex_unlock(&video_sink_lock);
-    return sample;
-}
-
 // Read the decoded stream's resolution and framerate
 // Returns TRUE if width/height were resolved.
 gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps)
@@ -235,19 +170,6 @@ GstElement* create_audio_sink()
     gst_element_add_pad(leveledsink, gst_ghost_pad_new("sink", levelPad));
     
     return leveledsink;
-}
-
-GstBusSyncReply cb_create_window(GstBus *bus, GstMessage *message, gpointer user_data)
-{
-    if(!gst_is_video_overlay_prepare_window_handle_message(message))
-        return GST_BUS_PASS;
-    
-    if (video_overlay && drawable_surface) {
-        gst_video_overlay_set_window_handle(video_overlay, drawable_surface);
-    }
-    
-    gst_message_unref(message);
-    return GST_BUS_DROP;
 }
 
 /*********************
@@ -454,15 +376,17 @@ static void cb_error(GstBus *bus, GstMessage *msg, gpointer *user_data)
     g_autofree gchar *debug_info = NULL;
     
     gst_message_parse_error(msg, &err, &debug_info);
-    g_printerr("Error received from element %s: %s\n", GST_OBJECT_NAME(msg->src), err->message);
-    if (rct_gst_get_configuration()->onElementError) {
-        rct_gst_get_configuration()->onElementError(GST_OBJECT_NAME(msg->src), err->message, debug_info);
-    }
+    g_printerr("Error received from element %s: %s (%s)\n", GST_OBJECT_NAME(msg->src), err->message,
+               debug_info ? debug_info : "no debug info");
 
     // A recording branch failing only loses that file: the writer drops its
     // branch, and the live stream (and any other recording) keeps running.
     if (writer_handle_message(msg))
         return;
+
+    if (rct_gst_get_configuration()->onElementError) {
+        rct_gst_get_configuration()->onElementError(GST_OBJECT_NAME(msg->src), err->message, debug_info);
+    }
 
 #if defined(__APPLE__)
     dispatch_sync(dispatch_get_main_queue(), ^{
@@ -633,7 +557,7 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
         return GST_STATE_CHANGE_ASYNC;
     }
 
-    GstStateChangeReturn validity = gst_element_set_state(target, state);
+    GstStateChangeReturn validity = rct_gst_display_set_pipeline_state(target, state);
     g_print("Validity : %s\n", gst_element_state_change_return_get_name(validity));
 
     return validity;
@@ -643,11 +567,12 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 // may still be able to reach the pipeline once its last ref is dropped.
 //
 //   1. consumer branches (they hold request pads on the pipeline's tees),
-//   2. the bus watch AND the bus sync handler - the sync handler runs on a
-//      streaming thread and reads video_overlay / drawable_surface, and the watch
+//   2. the bus watch AND the bus sync handler - the display's sync handler runs
+//      on a streaming thread and reads its sink and surface, and the watch
 //      dereferences `pipeline` from the GMainLoop thread, which is NOT the thread
 //      calling this on either platform,
-//   3. the state change to NULL, which joins the streaming threads,
+//   3. the state change to NULL, which joins the streaming threads - the display
+//      first, see rct_gst_display_set_pipeline_state(),
 //   4. the last ref.
 //
 // Safe to call with no pipeline, and safe to call twice.
@@ -673,28 +598,19 @@ static void destroy_pipeline(void)
             gst_bus_set_sync_handler(pipeline_bus, NULL, NULL, NULL);
         }
 
-        gst_element_set_state(target, GST_STATE_NULL);
+        rct_gst_display_set_pipeline_state(target, GST_STATE_NULL);
+        rct_gst_display_reset(target);
         gst_object_unref(target);
     }
     bus = NULL;   // unreffed in rct_gst_init; never dereference it again
 
-    // video_overlay is a cast of video_sink, NOT a second ref - clearing the
-    // pointer is the whole job. Unreffing it too would over-unref the sink.
-    g_mutex_lock(&video_sink_lock);
-    GstElement *sink = video_sink;
-    video_sink = NULL;
-    g_mutex_unlock(&video_sink_lock);
-    if (sink)
-        gst_object_unref(sink);
-
-    video_overlay = NULL;
     video_tee = NULL;
     audio_level_element = NULL;   // owned by the bin from create_audio_sink()
 }
 
 void rct_gst_init(RctGstConfiguration *configuration)
 {
-    const gchar *launch_command_debug = "videotestsrc ! glimagesink name=video-sink";
+    const gchar *launch_command_debug = "videotestsrc ! glimagesink name=" RCT_GST_VIDEO_SINK;
 
     destroy_pipeline();
 
@@ -702,19 +618,11 @@ void rct_gst_init(RctGstConfiguration *configuration)
     // negotiates (JPEG or H264), which isn't known until RTSP SETUP completes,
     // so it's built dynamically in rct_gst_link_decode_chain() once rtspsrc's
     // pad appears. Only the codec-agnostic tail is static here.
-    //
-    // The display queue is bounded and leaky so a stalled sink drops stale
-    // frames instead of filling, blocking the tee (and with it the decoder and
-    // the encoder branch), then replaying the backlog at sync=false speed.
     const gchar *launch_command_app =
         "rtspsrc is-live=true protocols=tcp latency=0 drop-on-latency=false name=src "
         "do-retransmission=false tcp-timeout=2000000 "
         "teardown-timeout=2000000000 "
-        "tee name=video-tee "
-        "! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
-        "! videoconvert ! video/x-raw,format=NV12 "
-        "! vulkanupload ! vulkancolorconvert "
-        "! vulkansink sync=false name=video-sink enable-last-sample=true";
+        "tee name=video-tee ! " RCT_GST_DISPLAY_BRANCH;
     g_print("Launch command: %s\n", launch_command_app);
 
     // Prepare pipeline. If not working, will display an error video signal
@@ -756,7 +664,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
 
     // First time, need a surface to draw on - then use rct_gst_set_drawable_surface
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);
-    gst_bus_set_sync_handler(bus,(GstBusSyncHandler)cb_create_window, new_pipeline, NULL);
+    gst_bus_set_sync_handler(bus, rct_gst_display_bus_sync, NULL, NULL);
     gst_object_unref(bus);
 
     // Apply URI
@@ -790,7 +698,7 @@ void rct_gst_terminate()
     // probe and branch that could still call back into the state freed below.
     destroy_pipeline();
 
-    drawable_surface = 0;
+    rct_gst_set_drawable_surface(0);
 
     // Stop the GMainLoop. It is running on another thread (a pthread on Android,
     // a dispatch queue on iOS), so it owns its own ref and unrefs it in

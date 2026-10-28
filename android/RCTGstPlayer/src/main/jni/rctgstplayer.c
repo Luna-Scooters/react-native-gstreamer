@@ -75,21 +75,31 @@ static jstring native_rct_gst_get_gstreamer_info(JNIEnv* env, jobject thiz)
     return version_jstring;
 }
 
+// From surfaceChanged with the surface, and from surfaceDestroyed with null.
 static void native_rct_gst_set_drawable_surface(JNIEnv* env, jobject thiz, jobject surface)
 {
-    (void)env;
     (void)thiz;
 
-    // ANativeWindow_fromSurface acquires a reference on every call (this runs on
-    // every surfaceChanged), so release the one we were holding. Do it AFTER the
-    // sink has been pointed at the new window. Releasing unconditionally is
-    // correct even when the same Surface yields the same pointer: that call
-    // acquired a second reference which is exactly what we drop here.
-    ANativeWindow *previous_window = native_window;
-    native_window = ANativeWindow_fromSurface(env, surface);
-    rct_gst_set_drawable_surface((guintptr)native_window);
-    if (previous_window)
-        ANativeWindow_release(previous_window);
+    // ANativeWindow_fromSurface acquires a reference on every call, and this
+    // runs on every surfaceChanged: one reference per window is kept.
+    ANativeWindow *window = surface ? ANativeWindow_fromSurface(env, surface) : NULL;
+    if (window && window == native_window) {
+        ANativeWindow_release(window);
+        return;
+    }
+
+    // The sink lets go of the window it draws into before that is released -
+    // it does not hold a reference of its own - and before a new one is set.
+    if (native_window) {
+        rct_gst_set_drawable_surface(0);
+        ANativeWindow_release(native_window);
+        native_window = NULL;
+    }
+
+    if (window) {
+        native_window = window;
+        rct_gst_set_drawable_surface((guintptr)native_window);
+    }
 }
 
 static void native_rct_gst_set_pipeline_state(JNIEnv* env, jobject thiz, jint state)
