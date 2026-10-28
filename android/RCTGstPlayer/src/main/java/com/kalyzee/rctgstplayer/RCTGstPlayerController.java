@@ -1,13 +1,14 @@
 package com.kalyzee.rctgstplayer;
 
 import android.graphics.Bitmap;
+import android.graphics.SurfaceTexture;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.PixelCopy;
 import android.view.Surface;
-import android.view.SurfaceHolder;
+import android.view.TextureView;
 import android.view.View;
 import android.widget.Toast;
 
@@ -33,7 +34,7 @@ import org.freedesktop.gstreamer.GStreamer;
  */
 
 public class RCTGstPlayerController
-    implements RCTGstConfigurationCallable, SurfaceHolder.Callback {
+    implements RCTGstConfigurationCallable, TextureView.SurfaceTextureListener {
 
   private static final String LOG_TAG = "RCTGstPlayer";
 
@@ -41,6 +42,7 @@ public class RCTGstPlayerController
 
   private RCTGstConfiguration configuration;
   private EaglUIView view;
+  private Surface surface;   // over the view's SurfaceTexture, while it has one
   private ReactContext context;
 
   private AtomicBoolean runCopyImageThread = new AtomicBoolean(false);
@@ -183,7 +185,7 @@ public class RCTGstPlayerController
                                             Bitmap.Config.ARGB_8888);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
           latchCopyImage = new CountDownLatch(1);
-          PixelCopy.request(view, bitmap, ret -> {
+          PixelCopy.request(surface, bitmap, ret -> {
             if (ret == PixelCopy.SUCCESS) {
               ImageCache.getInstance().setBitmap(bitmap);
             }
@@ -233,11 +235,14 @@ public class RCTGstPlayerController
 
   // Surface callbacks
   @Override
-  public void surfaceCreated(SurfaceHolder holder) {
+  public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture,
+                                        int width, int height) {
+    surface = new Surface(surfaceTexture);
+
     if (!isInited) {
 
       // Preparing configuration
-      this.configuration.setInitialDrawableSurface(holder.getSurface());
+      this.configuration.setInitialDrawableSurface(surface);
 
       // Init and run our pipeline
       nativeRCTGstInitAndRun(this.configuration);
@@ -247,27 +252,37 @@ public class RCTGstPlayerController
 
       startCaptureThread();
     }
+
+    nativeRCTGstSetDrawableSurface(surface);
   }
 
   @Override
-  public void surfaceChanged(SurfaceHolder holder, int format, int width,
-                             int height) {
-    nativeRCTGstSetDrawableSurface(holder.getSurface());
+  public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surfaceTexture,
+                                          int width, int height) {
+    nativeRCTGstSetDrawableSurface(surface);
   }
 
   @Override
-  public void surfaceDestroyed(SurfaceHolder holder) {
+  public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surfaceTexture) {
     stopCaptureThread();
 
     // Nothing may draw into the surface once this returns, while the pipeline
-    // outlives it: the app going to background mid-ride, or React Native
-    // removing the view before onDropViewInstance terminates the player. The
-    // video sink stops here, the rest - a recording - runs on, and
-    // surfaceChanged brings it back with the next surface.
+    // outlives it: React Native removing the view before onDropViewInstance
+    // terminates the player, say. The app going to background is not one of
+    // those - a TextureView keeps its SurfaceTexture until it leaves the window.
+    // The video sink stops here, the rest - a recording - runs on, and
+    // onSurfaceTextureAvailable brings it back with the next surface.
     if (isInited) {
       nativeRCTGstSetDrawableSurface(null);
     }
+
+    surface.release();
+    surface = null;
+    return true;
   }
+
+  @Override
+  public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surfaceTexture) {}
 
   // Called from RCTGstPlayer.onDropViewInstance, i.e. when the JS component
   // unmounts. Without this the pipeline stays in PLAYING: the RTSP session and

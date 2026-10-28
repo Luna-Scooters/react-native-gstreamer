@@ -56,6 +56,7 @@ RctGstConfiguration *rct_gst_get_configuration()
         configuration->onEOS = NULL;
         configuration->onRecordingFinished = NULL;
         configuration->onEventSaved = NULL;
+        configuration->onDisplayThreadEnter = NULL;
         configuration->initialDrawableSurface = 0;
     }
     return configuration;
@@ -731,6 +732,7 @@ void rct_gst_terminate()
         configuration->onElementError = NULL;
         configuration->onRecordingFinished = NULL;
         configuration->onEventSaved = NULL;
+        configuration->onDisplayThreadEnter = NULL;
     }
 
     if (audio_level) {

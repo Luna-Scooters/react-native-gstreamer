@@ -215,6 +215,16 @@ void native_on_event_saved(gchar *file_path)
     (*env)->DeleteLocalRef(env, path);
 }
 
+// The display's thread presents into the TextureView's SurfaceTexture, which
+// calls into Java on that thread for every frame. ART would attach the thread
+// and detach it again each time - and its sampling profiler, which Sentry's
+// profiling starts, has been seen aborting on that churn. Attached up front, it
+// stays attached until it exits.
+void native_on_display_thread_enter()
+{
+    get_jni_env();
+}
+
 static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_configuration)
 {
     RctGstConfiguration* configuration = rct_gst_get_configuration();
@@ -250,6 +260,7 @@ static void native_rct_gst_init_and_run(JNIEnv* env, jobject thiz, jobject j_con
     configuration->onElementError = native_on_element_error;
     configuration->onRecordingFinished = native_on_recording_finished;
     configuration->onEventSaved = native_on_event_saved;
+    configuration->onDisplayThreadEnter = native_on_display_thread_enter;
 
     rct_gst_init(configuration);
 
