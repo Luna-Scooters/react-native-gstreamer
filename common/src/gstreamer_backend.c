@@ -579,6 +579,7 @@ GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 // Safe to call with no pipeline, and safe to call twice.
 static void destroy_pipeline(void)
 {
+    rct_gst_frame_sink_detach();
     rct_gst_recorder_reset();
     rct_gst_event_recorder_reset();
     rct_gst_h264_reset();
@@ -662,6 +663,9 @@ void rct_gst_init(RctGstConfiguration *configuration)
     g_mutex_lock(&pipeline_lock);
     pipeline = new_pipeline;
     g_mutex_unlock(&pipeline_lock);
+
+    // Frames for inference, if the app asked for them before this pipeline.
+    rct_gst_frame_sink_attach();
 
     // First time, need a surface to draw on - then use rct_gst_set_drawable_surface
     rct_gst_set_drawable_surface(rct_gst_get_configuration()->initialDrawableSurface);

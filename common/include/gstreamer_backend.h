@@ -62,6 +62,7 @@ void apply_uri();
 gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps);
 
 #include "gstreamer_display.h"
+#include "gstreamer_frame_sink.h"
 #include "gstreamer_h264_feed.h"
 #include "gstreamer_recorder.h"
 #include "gstreamer_event_recorder.h"

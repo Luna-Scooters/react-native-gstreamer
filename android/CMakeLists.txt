@@ -43,6 +43,7 @@ find_package(GStreamerMobile REQUIRED COMPONENTS
     ca_certificates
     api_player
     api_video
+    api_app
     ${GSTREAMER_PLUGINS})
 
 # The shared platform-independent code, with GStreamer supplied from here.
