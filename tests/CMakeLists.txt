@@ -15,7 +15,8 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GST REQUIRED IMPORTED_TARGET
     gstreamer-1.0
     gstreamer-base-1.0
-    gstreamer-video-1.0)
+    gstreamer-video-1.0
+    gstreamer-app-1.0)
 
 # CTest timeout for each test suite
 set(SUITE_TIMEOUT 120 CACHE STRING "Per-suite timeout in seconds")
