@@ -83,6 +83,7 @@ protected:
     {
         liveFrames = 0;
         errors = 0;
+        eos = 0;
         pushed = 0;
 
         GError *error = nullptr;
@@ -117,6 +118,8 @@ protected:
         watchId = gst_bus_add_watch(bus.get(), +[](GstBus *, GstMessage *msg, gpointer self) -> gboolean {
             if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_ERROR)
                 static_cast<FrameSink *>(self)->errors++;
+            if (GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS)
+                static_cast<FrameSink *>(self)->eos++;
             return TRUE;
         }, this);
 
@@ -172,7 +175,7 @@ protected:
 
     bool waitForFrame(std::vector<guint8> &rgba) { return waitUntil([&] { return next(rgba); }, 2s); }
 
-    // Long enough for a pushed frame to cross both queues and land in the sink.
+    // Long enough for a pushed frame to cross the live queue and land in the sink.
     void letFramesSettle() { waitUntil([] { return false; }, 200ms); }
 
     // The camera view still gets every frame pushed.
@@ -195,6 +198,7 @@ protected:
     std::atomic<int> liveFrames{0};
     std::atomic<int> pushed{0};
     int errors = 0;
+    int eos = 0;   // the pipeline's EOS: posted once every sink has it
 };
 
 } // namespace
@@ -275,6 +279,26 @@ TEST_F(FrameSink, ABufferTooSmallLeavesTheFrameForTheNextCall)
     EXPECT_TRUE(waitForFrame(rgba)) << "the frame was used up by the failed call";
 }
 
+// The sink runs on the tee's thread. With a frame left unpulled, an EOS must
+// still go through it rather than wait for a reader, or the tee is stuck on it
+// and the view's branch never finishes either.
+TEST_F(FrameSink, EosGoesThroughAFrameNobodyPulled)
+{
+    ASSERT_EQ(rct_gst_frame_sink_configure(16, 16), 0);
+    ASSERT_EQ(push(kRed), GST_FLOW_OK);
+    ASSERT_TRUE(waitUntil([&] { return liveFrames >= 1; }, 2s));
+    letFramesSettle();
+
+    ASSERT_EQ(gst_app_src_end_of_stream(camera), GST_FLOW_OK);
+    EXPECT_TRUE(waitUntil([&] { return eos > 0; }, 2s)) << "EOS stuck in the frame sink";
+    EXPECT_EQ(errors, 0);
+
+    // The frame left behind is still there for the reader.
+    auto rgba = frameOf(16, 16);
+    EXPECT_TRUE(next(rgba));
+    EXPECT_TRUE(everyPixel(rgba, 16, 16, isRed));
+}
+
 TEST_F(FrameSink, RejectsSizesNoModelTakes)
 {
     EXPECT_EQ(rct_gst_frame_sink_configure(0, 16), -1);
@@ -293,18 +317,25 @@ TEST_F(FrameSink, NothingIsHandedOutUntilFramesAreAskedFor)
     EXPECT_EQ(teeSrcPads(), 1) << "the branch is up without anyone asking for frames";
 }
 
-// Asking for another size keeps the branch and converts to the new one.
-TEST_F(FrameSink, ResizingTakesEffectOnTheNextFrame)
+// The size is fixed until stop: the converter is built for it once.
+TEST_F(FrameSink, TheSizeIsFixedUntilStop)
 {
     ASSERT_EQ(rct_gst_frame_sink_configure(16, 16), 0);
     ASSERT_EQ(push(kRed), GST_FLOW_OK);
     auto first = frameOf(16, 16);
     ASSERT_TRUE(waitForFrame(first));
 
-    ASSERT_EQ(rct_gst_frame_sink_configure(40, 24), 0);
-    EXPECT_EQ(teeSrcPads(), 2) << "resizing built a second branch";
+    EXPECT_EQ(rct_gst_frame_sink_configure(40, 24), -1) << "another size was taken before stop";
+    EXPECT_EQ(rct_gst_frame_sink_configure(16, 16), 0) << "asking again for the same size failed";
+    EXPECT_EQ(teeSrcPads(), 2) << "asking again built a second branch";
     ASSERT_EQ(push(kGreen), GST_FLOW_OK);
+    auto same = frameOf(16, 16);
+    ASSERT_TRUE(waitForFrame(same));
+    EXPECT_TRUE(everyPixel(same, 16, 16, isGreen));
 
+    rct_gst_frame_sink_stop();
+    ASSERT_EQ(rct_gst_frame_sink_configure(40, 24), 0) << "a new size after stop failed";
+    ASSERT_EQ(push(kGreen), GST_FLOW_OK);
     auto resized = frameOf(40, 24);
     ASSERT_TRUE(waitForFrame(resized));
     EXPECT_TRUE(everyPixel(resized, 40, 24, isGreen));

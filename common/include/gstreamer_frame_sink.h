@@ -5,7 +5,7 @@
 //  the newest decoded frame and hands it out as packed RGBA at the model's
 //  input size.
 //
-//      video-tee ! queue (newest frame) ! appsink (newest frame)
+//      video-tee ! appsink (newest frame)
 //
 //  The branch only holds a reference to the decoder's frame. Converting and
 //  scaling it happen in rct_gst_frame_sink_next(), on the caller's thread, so
@@ -45,9 +45,10 @@ extern "C" {
 #endif
 
 // Ask for frames of `width` x `height`, and start the branch if the player is
-// running; otherwise it starts with the player. Calling it again only changes
-// the size. 0 on success; -1 for a size of 0 or over 4096, or if the branch
-// can't be built. Any thread.
+// running; otherwise it starts with the player. The size is fixed until
+// rct_gst_frame_sink_stop(): asking again for the same size only rebuilds a
+// missing branch. 0 on success; -1 for a size of 0 or over 4096, for another
+// size before stop, or if the branch can't be built. Any thread.
 RCT_GST_FRAME_SINK_API int rct_gst_frame_sink_configure(uint32_t width, uint32_t height);
 
 // Copy the newest frame that hasn't been handed out yet into `rgba`, as

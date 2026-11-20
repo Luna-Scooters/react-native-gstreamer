@@ -17,30 +17,33 @@ extern GstElement *video_tee;
 // A model's input, not a camera image.
 #define MAX_SIDE 4096
 
-// The branch on video-tee. The queue and the sink each keep one frame and drop
-// the older one, so a slow reader - or none - never holds the tee back.
-// async=false: a sink that has to preroll, added to a PLAYING pipeline, makes
-// it lose its state (see display_up in gstreamer_display.c). caps=video/x-raw:
-// system memory, which the converter can read.
-#define FRAME_SINK_BRANCH                                                       \
-    "queue name=frame-sink-queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream " \
-    "! appsink name=frame-sink caps=video/x-raw max-buffers=1 drop=true "      \
-    "sync=false async=false qos=false enable-last-sample=false"
-
 // The thread that builds and destroys pipelines and the inference thread both
 // change what follows.
 static GMutex lock;
-static guint width, height;            // asked for; 0 while frames aren't wanted
+static GstVideoInfo out_info;         // RGBA at the size asked for; width 0 while frames aren't wanted
 static GstElement *attached_pipeline;  // ref, from attach to detach
 static GstElement *attached_tee;       // ref, likewise
-static GstElement *branch;             // ref, while built
-static GstPad *tee_pad;                // ref: video-tee's request pad feeding the branch
+static GstPad *tee_pad;                // ref: video-tee's request pad feeding the sink
 static GstAppSink *sink;               // ref, while built
 
-// Kept for as long as the frames' format and the size asked for stay the same.
+// Built for the first frame converted, and kept until a new pipeline or stop:
+// the frames' format doesn't change while a pipeline is up, and the size can't
+// change before stop. One built for another size would write past the caller's
+// buffer.
 static GMutex convert_lock;
 static GstVideoConverter *converter;
-static GstVideoInfo converter_in, converter_out;
+// Bilinear is plenty for a detector's input, and cheaper than the default cubic.
+static const gchar CONVERTER_OPTIONS[] = "GstVideoConverter, "
+    GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD "=(GstVideoResamplerMethod)linear, "
+    GST_VIDEO_CONVERTER_OPT_CHROMA_RESAMPLER_METHOD "=(GstVideoResamplerMethod)linear, "
+    GST_VIDEO_CONVERTER_OPT_DITHER_METHOD "=(GstVideoDitherMethod)none";
+
+static void converter_clear(void)
+{
+    g_mutex_lock(&convert_lock);
+    g_clear_pointer(&converter, gst_video_converter_free);
+    g_mutex_unlock(&convert_lock);
+}
 
 // Call with lock.
 static void branch_remove(void)
@@ -51,55 +54,62 @@ static void branch_remove(void)
         gst_element_release_request_pad(attached_tee, tee_pad);
         gst_clear_object(&tee_pad);
     }
-    if (branch) {
+    if (sink) {
+        GstElement *element = GST_ELEMENT(sink);
         // Down, and kept down whatever the pipeline does in the meantime.
-        gst_element_set_locked_state(branch, TRUE);
-        gst_element_set_state(branch, GST_STATE_NULL);
-        g_autoptr(GstObject) parent = gst_element_get_parent(branch);
+        gst_element_set_locked_state(element, TRUE);
+        gst_element_set_state(element, GST_STATE_NULL);
+        g_autoptr(GstObject) parent = gst_element_get_parent(element);
         if (parent)
-            gst_bin_remove(GST_BIN(parent), branch);
-        gst_clear_object(&branch);
+            gst_bin_remove(GST_BIN(parent), element);
+        gst_clear_object(&sink);
     }
-    gst_clear_object(&sink);
 }
 
-// Build the branch if frames are wanted and there is a pipeline to hang it on.
-// FALSE if it should be there and isn't. Call with lock.
+// Build the branch - one appsink on video-tee - if frames are wanted and there
+// is a pipeline to hang it on. -1 if it should be there and isn't, otherwise 0.
+// Call with lock.
 static int branch_build(void)
 {
-    if (branch || !attached_pipeline || !width)
+    if (sink || !attached_pipeline || !GST_VIDEO_INFO_WIDTH(&out_info))
         return 0;
 
-    g_autoptr(GError) error = NULL;
-    GstElement *bin = gst_parse_bin_from_description(FRAME_SINK_BRANCH, TRUE, &error);
-    if (error) {
-        g_printerr("frame sink: branch build failed: %s\n", error->message);
-        // A failed parse can still hand back part of the bin.
-        if (bin)
-            gst_object_unref(bin);
+    GstElement *element = gst_element_factory_make("appsink", "frame-sink");
+    if (!element) {
+        g_printerr("frame sink: no appsink element\n");
         return -1;
     }
-    g_autoptr(GstElement) app_sink = gst_bin_get_by_name(GST_BIN(bin), "frame-sink");
+    g_autoptr(GstCaps) caps = gst_caps_new_empty_simple("video/x-raw");
+    g_object_set(element,
+                 "caps", caps,
+                 "max-buffers", 1u,
+                 "drop", TRUE,
+                 "sync", FALSE,
+                 "async", FALSE,
+                 "qos", FALSE,
+                 "enable-last-sample", FALSE,
+                 "wait-on-eos", FALSE,
+                 NULL);
 
-    gst_bin_add(GST_BIN(attached_pipeline), bin);   // sinks the floating ref
-    branch = gst_object_ref(bin);
+    gst_bin_add(GST_BIN(attached_pipeline), element);   // sinks the floating ref
+    sink = GST_APP_SINK(gst_object_ref(element));
 
     // Up to the pipeline's state before linking: a push into a pad that isn't
     // active yet returns FLUSHING, which the tee passes upstream, and the
     // source stops for good.
-    if (!gst_element_sync_state_with_parent(branch))
-        g_printerr("frame sink: could not bring the branch to the pipeline's state\n");
+    if (!gst_element_sync_state_with_parent(element))
+        g_printerr("frame sink: could not bring the sink to the pipeline's state\n");
 
     tee_pad = gst_element_request_pad_simple(attached_tee, "src_%u");
-    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(branch, "sink");
-    if (!tee_pad || !bin_sink || GST_PAD_LINK_FAILED(gst_pad_link(tee_pad, bin_sink))) {
+    g_autoptr(GstPad) sink_pad = gst_element_get_static_pad(element, "sink");
+    if (!tee_pad || GST_PAD_LINK_FAILED(gst_pad_link(tee_pad, sink_pad))) {
         g_printerr("frame sink: failed to link video-tee -> frame sink\n");
         branch_remove();
         return -1;
     }
 
-    sink = GST_APP_SINK(g_steal_pointer(&app_sink));
-    g_print("frame sink: %ux%u RGBA frames for inference\n", width, height);
+    g_print("frame sink: %dx%d RGBA frames for inference\n",
+            GST_VIDEO_INFO_WIDTH(&out_info), GST_VIDEO_INFO_HEIGHT(&out_info));
     return 0;
 }
 
@@ -121,6 +131,7 @@ void rct_gst_frame_sink_attach(void)
         branch_build();
     }
     g_mutex_unlock(&lock);
+    converter_clear();   // the new pipeline's frames may differ
 }
 
 void rct_gst_frame_sink_detach(void)
@@ -138,9 +149,17 @@ int rct_gst_frame_sink_configure(uint32_t new_width, uint32_t new_height)
     }
 
     g_mutex_lock(&lock);
-    width = new_width;
-    height = new_height;
-    // The branch doesn't depend on the size: one that is up stays up.
+    // The converter is built for the first size and kept: another one would
+    // have it write past the caller's buffer.
+    guint out_width = GST_VIDEO_INFO_WIDTH(&out_info);
+    guint out_height = GST_VIDEO_INFO_HEIGHT(&out_info);
+    if (out_width && (new_width != out_width || new_height != out_height)) {
+        g_printerr("frame sink: already asked for %ux%u; stop before asking for %ux%u\n",
+                   out_width, out_height, new_width, new_height);
+        g_mutex_unlock(&lock);
+        return -1;
+    }
+    gst_video_info_set_format(&out_info, GST_VIDEO_FORMAT_RGBA, new_width, new_height);
     int ret = branch_build();
     g_mutex_unlock(&lock);
     return ret;
@@ -149,73 +168,59 @@ int rct_gst_frame_sink_configure(uint32_t new_width, uint32_t new_height)
 void rct_gst_frame_sink_stop(void)
 {
     g_mutex_lock(&lock);
-    width = height = 0;
+    gst_video_info_init(&out_info);   // width 0: frames no longer wanted
     branch_remove();
     g_mutex_unlock(&lock);
-
-    g_mutex_lock(&convert_lock);
-    g_clear_pointer(&converter, gst_video_converter_free);
-    g_mutex_unlock(&convert_lock);
+    converter_clear();
 }
 
-// Bilinear is plenty for a detector's input, and cheaper than the default cubic.
-static GstStructure *converter_options(void)
+// Call with convert_lock.
+static void create_converter(const GstVideoInfo *in_info, const GstVideoInfo *rgba_info)
 {
-    return gst_structure_new("GstVideoConverter",
-        GST_VIDEO_CONVERTER_OPT_RESAMPLER_METHOD, GST_TYPE_VIDEO_RESAMPLER_METHOD,
-        GST_VIDEO_RESAMPLER_METHOD_LINEAR,
-        GST_VIDEO_CONVERTER_OPT_CHROMA_RESAMPLER_METHOD, GST_TYPE_VIDEO_RESAMPLER_METHOD,
-        GST_VIDEO_RESAMPLER_METHOD_LINEAR,
-        GST_VIDEO_CONVERTER_OPT_DITHER_METHOD, GST_TYPE_VIDEO_DITHER_METHOD,
-        GST_VIDEO_DITHER_NONE,
-        NULL);
+    // The options only parse once their enum types are registered; a NULL
+    // config would quietly give the defaults.
+    g_type_ensure(GST_TYPE_VIDEO_RESAMPLER_METHOD);
+    g_type_ensure(GST_TYPE_VIDEO_DITHER_METHOD);
+    converter = gst_video_converter_new(in_info, rgba_info,
+                                        gst_structure_from_string(CONVERTER_OPTIONS, NULL));
+    if (converter)
+        g_print("frame sink: converting %s %dx%d to RGBA %dx%d\n",
+                gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(in_info)),
+                GST_VIDEO_INFO_WIDTH(in_info), GST_VIDEO_INFO_HEIGHT(in_info),
+                GST_VIDEO_INFO_WIDTH(rgba_info), GST_VIDEO_INFO_HEIGHT(rgba_info));
+    else
+        g_printerr("frame sink: no converter from %s to RGBA\n",
+                   gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(in_info)));
 }
 
-// Scale and convert the sample's frame into `rgba`, stretched to fill it.
-static gboolean convert(GstSample *sample, guint8 *rgba, gsize size, guint out_width, guint out_height)
+// Scale and convert the frame in `buffer`, laid out as `in_info` says, into
+// `rgba`, laid out as `rgba_info` says - the caller's copy, which gets the
+// frame's rate and interlacing - stretched to fill it.
+static gboolean convert(GstBuffer *buffer, const GstVideoInfo *in_info,
+                        GstVideoInfo *rgba_info, guint8 *rgba, gsize size)
 {
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    GstCaps *caps = gst_sample_get_caps(sample);
-    GstVideoInfo in_info, out_info;
-    if (!buffer || !caps || !gst_video_info_from_caps(&in_info, caps))
-        return FALSE;
-    if (!gst_video_info_set_format(&out_info, GST_VIDEO_FORMAT_RGBA, out_width, out_height))
-        return FALSE;
     // The converter only changes format and size; it asserts the rest matches.
-    GST_VIDEO_INFO_FPS_N(&out_info) = GST_VIDEO_INFO_FPS_N(&in_info);
-    GST_VIDEO_INFO_FPS_D(&out_info) = GST_VIDEO_INFO_FPS_D(&in_info);
-    GST_VIDEO_INFO_INTERLACE_MODE(&out_info) = GST_VIDEO_INFO_INTERLACE_MODE(&in_info);
+    GST_VIDEO_INFO_FPS_N(rgba_info) = GST_VIDEO_INFO_FPS_N(in_info);
+    GST_VIDEO_INFO_FPS_D(rgba_info) = GST_VIDEO_INFO_FPS_D(in_info);
+    GST_VIDEO_INFO_INTERLACE_MODE(rgba_info) = GST_VIDEO_INFO_INTERLACE_MODE(in_info);
 
     // Maps through the frame's video meta, so the decoder's strides are honoured.
     GstVideoFrame in_frame;
-    if (!gst_video_frame_map(&in_frame, &in_info, buffer, GST_MAP_READ))
+    if (!gst_video_frame_map(&in_frame, in_info, buffer, GST_MAP_READ))
         return FALSE;
 
     // The caller's memory as the output frame, written in place.
     g_autoptr(GstBuffer) out = gst_buffer_new_wrapped_full(0, rgba, size, 0,
-                                                           GST_VIDEO_INFO_SIZE(&out_info), NULL, NULL);
+                                                           GST_VIDEO_INFO_SIZE(rgba_info), NULL, NULL);
     GstVideoFrame out_frame;
-    if (!gst_video_frame_map(&out_frame, &out_info, out, GST_MAP_WRITE)) {
+    if (!gst_video_frame_map(&out_frame, rgba_info, out, GST_MAP_WRITE)) {
         gst_video_frame_unmap(&in_frame);
         return FALSE;
     }
 
     g_mutex_lock(&convert_lock);
-    if (!converter || !gst_video_info_is_equal(&in_info, &converter_in) ||
-        !gst_video_info_is_equal(&out_info, &converter_out)) {
-        g_clear_pointer(&converter, gst_video_converter_free);
-        converter = gst_video_converter_new(&in_info, &out_info, converter_options());
-        converter_in = in_info;
-        converter_out = out_info;
-        if (converter)
-            g_print("frame sink: converting %s %dx%d to RGBA %ux%u\n",
-                    gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(&in_info)),
-                    GST_VIDEO_INFO_WIDTH(&in_info), GST_VIDEO_INFO_HEIGHT(&in_info),
-                    out_width, out_height);
-        else
-            g_printerr("frame sink: no converter from %s to RGBA\n",
-                       gst_video_format_to_string(GST_VIDEO_INFO_FORMAT(&in_info)));
-    }
+    if (!converter)
+        create_converter(in_info, rgba_info);
     gboolean ok = converter != NULL;
     if (ok)
         gst_video_converter_frame(converter, &in_frame, &out_frame);
@@ -228,25 +233,43 @@ static gboolean convert(GstSample *sample, guint8 *rgba, gsize size, guint out_w
 
 int rct_gst_frame_sink_next(uint8_t *rgba, size_t size)
 {
+    if (!rgba || size == 0) {
+        g_printerr("frame sink: next called with no buffer\n");
+        return -1;   
+    }
+
     g_mutex_lock(&lock);
-    GstAppSink *from = sink ? gst_object_ref(sink) : NULL;
-    guint out_width = width, out_height = height;
+    g_autoptr(GstAppSink) sink_ref = sink ? gst_object_ref(sink) : NULL;
+    // A copy: checked and converted at the same size, whatever stop and
+    // configure do meanwhile.
+    GstVideoInfo rgba_info = out_info;
     g_mutex_unlock(&lock);
-    if (!from)
+    if (!sink_ref)
         return -1;
 
     // Checked before pulling, so a buffer too small doesn't use the frame up.
-    gsize needed = (gsize)out_width * out_height * 4;
-    if (!rgba || size < needed) {
-        g_printerr("frame sink: a %ux%u frame needs %" G_GSIZE_FORMAT " bytes, got %" G_GSIZE_FORMAT "\n",
-                   out_width, out_height, needed, (gsize)size);
-        gst_object_unref(from);
+    gsize frame_size = GST_VIDEO_INFO_SIZE(&rgba_info);
+    if (size < frame_size) {
+        g_printerr("frame sink: this frame needs %" G_GSIZE_FORMAT " bytes, got %" G_GSIZE_FORMAT "\n",
+                   frame_size, (gsize)size);
         return -1;
     }
 
     // Whatever the sink holds is newer than the last frame handed out: it lets
     // go of a frame as it is pulled.
-    g_autoptr(GstSample) sample = gst_app_sink_try_pull_sample(from, 0);
-    gst_object_unref(from);
-    return sample && convert(sample, rgba, size, out_width, out_height) ? 0 : -1;
+    g_autoptr(GstSample) sample = gst_app_sink_try_pull_sample(sink_ref, 0);
+
+    if (!sample) {
+        g_printerr("frame sink: no frame available\n");
+        return -1;
+    }
+
+    // Both borrowed from the sample, which outlives the conversion.
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    GstCaps *caps = gst_sample_get_caps(sample);
+    GstVideoInfo in_info;
+    if (!buffer || !caps || !gst_video_info_from_caps(&in_info, caps))
+        return -1;
+
+    return convert(buffer, &in_info, &rgba_info, rgba, size) ? 0 : -1;
 }
