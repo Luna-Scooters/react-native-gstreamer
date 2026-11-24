@@ -562,7 +562,8 @@ static gboolean branch_attach(GstElement *branch, GstPad *src)
     gst_element_get_state(branch, NULL, NULL, BRANCH_STATE_TIMEOUT);
 
     g_autoptr(GstPad) sink = gst_element_get_static_pad(branch, "sink");
-    if (gst_pad_link(src, sink) != GST_PAD_LINK_OK) {
+    GstPadLinkReturn ret = gst_pad_link(src, sink);
+    if (ret != GST_PAD_LINK_OK) {
         g_printerr("Could not link %s:%s to %s (%s)\n", GST_DEBUG_PAD_NAME(src),
                    GST_ELEMENT_NAME(branch), gst_pad_link_get_name(ret));
         rct_gst_detach_branch(branch);

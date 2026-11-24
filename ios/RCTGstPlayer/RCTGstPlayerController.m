@@ -7,24 +7,12 @@
 //
 
 #import "RCTGstPlayerController.h"
-#import "ImageCache.h"
 #import <stdatomic.h>
-#import <Metal/Metal.h>
-#import <gst/vulkan/vulkan.h>
-#import <MoltenVK/mvk_deprecated_api.h>
 
 @interface RCTGstPlayerController ()
 {
     RctGstConfiguration *configuration;
     EaglUIView *drawableSurface;
-    
-    atomic_bool runCopyImageThread;
-    atomic_bool captureFrames;
-    dispatch_queue_t imageCaptureQueue;
-    dispatch_semaphore_t imageCaptureDone;
-    long lastCaptureTimeMs;
-    long captureFps;
-    long capturePeriodMs;
 
     _Atomic(NSUInteger) teardownGeneration;
 }
@@ -79,12 +67,6 @@ static dispatch_queue_t pipeline_state_queue = NULL;
     if (self) {
         _view = [[RctGstParentView alloc] init];
         currentInstance = self;
-        
-
-        [self stopImageCapture];
-        captureFps = 15;
-        capturePeriodMs = (1000 / captureFps);
-        lastCaptureTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);
     }
     return self;
 }
@@ -117,129 +99,6 @@ static dispatch_queue_t pipeline_state_queue = NULL;
         }
         
         self->drawableSurface = nil;
-    }
-}
-
-// Cached Metal objects for the GPU->CPU readback blit.
-static id<MTLCommandQueue> s_blitQueue = nil;
-static id<MTLBuffer> s_blitBuffer = nil;
-static NSUInteger s_blitBufferLen = 0;
-
-// Capture runs ~30x/sec, so log only on outcome transitions (not every frame).
-static int s_capState = -1;        // 0 no-sample, 1 not-vulkan, 2 no-proc, 3 no-texture, 4 ok
-static BOOL s_loggedTexInfo = NO;  // one-time texture format/usage log
-static BOOL s_loggedBlitErr = NO;  // one-time blit-error log
-static void capLogOnce(int st, NSString *msg) {
-    if (st != s_capState) { s_capState = st; NSLog(@"[GST-VK] capture: %@", msg); }
-}
-
-// Grabs vulkansink's last rendered frame
-- (UIImage *)captureVulkanFrame {
-    GstSample *sample = rct_gst_pull_last_sample();
-    if (!sample) {
-        capLogOnce(0, @"no last-sample yet (sink not playing / enable-last-sample off?)");
-        return nil;
-    }
-
-    GstBuffer *buffer = gst_sample_get_buffer(sample);
-    GstMemory *mem = buffer ? gst_buffer_peek_memory(buffer, 0) : NULL;
-    if (!mem || !gst_is_vulkan_image_memory(mem)) {
-        capLogOnce(1, [NSString stringWithFormat:@"buffer mem is not vulkan image memory (mem=%p)", mem]);
-        gst_sample_unref(sample);
-        return nil;
-    }
-
-    GstVulkanImageMemory *vkmem = (GstVulkanImageMemory *)mem;
-    // Call MoltenVK's exporter directly: the symbol is in libGStreamer.a, but it's not
-    // in the device dispatch table (VK_MVK_moltenvk isn't enabled), so the proc-address
-    // lookup returns NULL. (Deprecated API, but the simplest VkImage -> MTLTexture path.)
-    id<MTLTexture> tex = nil;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    vkGetMTLTextureMVK(vkmem->image, &tex);
-#pragma clang diagnostic pop
-    if (!tex) {
-        capLogOnce(3, @"vkGetMTLTextureMVK returned a nil MTLTexture");
-        gst_sample_unref(sample);
-        return nil;
-    }
-
-    NSUInteger w = tex.width, h = tex.height;
-    if (!s_loggedTexInfo) {
-        s_loggedTexInfo = YES;
-        NSLog(@"[GST-VK] capture: MTLTexture %lux%lu pixelFormat=%lu usage=0x%lx storageMode=%lu",
-              (unsigned long)w, (unsigned long)h, (unsigned long)tex.pixelFormat,
-              (unsigned long)tex.usage, (unsigned long)tex.storageMode);
-    }
-
-    UIImage *result = nil;
-    NSUInteger bytesPerRow = w * 4;
-    NSUInteger total = bytesPerRow * h;
-    id<MTLDevice> dev = tex.device;
-
-    if (s_blitQueue == nil)
-        s_blitQueue = [dev newCommandQueue];
-    if (s_blitBuffer == nil || s_blitBufferLen < total) {
-        s_blitBuffer = [dev newBufferWithLength:total options:MTLResourceStorageModeShared];
-        s_blitBufferLen = total;
-    }
-
-    id<MTLCommandBuffer> cmd = [s_blitQueue commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-    [blit copyFromTexture:tex
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(w, h, 1)
-                 toBuffer:s_blitBuffer
-        destinationOffset:0
-   destinationBytesPerRow:bytesPerRow
- destinationBytesPerImage:total];
-    [blit endEncoding];
-    [cmd commit];
-    [cmd waitUntilCompleted];
-    if (cmd.error && !s_loggedBlitErr) {
-        s_loggedBlitErr = YES;
-        NSLog(@"[GST-VK] capture: blit command error: %@", cmd.error);
-    }
-
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(s_blitBuffer.contents, w, h, 8, bytesPerRow, cs,
-        kCGBitmapByteOrder32Little | kCGImageAlphaPremultipliedFirst); // BGRA
-    if (ctx) {
-        CGImageRef cgImg = CGBitmapContextCreateImage(ctx);
-        if (cgImg) {
-            result = [UIImage imageWithCGImage:cgImg];
-            CGImageRelease(cgImg);
-        }
-        CGContextRelease(ctx);
-    }
-    CGColorSpaceRelease(cs);
-
-    capLogOnce(4, [NSString stringWithFormat:@"OK -> feeding %lux%lu frames to ImageCache", (unsigned long)w, (unsigned long)h]);
-    gst_sample_unref(sample);
-    return result;
-}
-
-- (void)threadCopyImageFunc {
-    NSLog(@"Starting image capture thread");
-    while (atomic_load(&runCopyImageThread)) {
-        @autoreleasepool {
-            UIImage *image = [self captureVulkanFrame];
-            if (image) {
-                [[ImageCache getInstance] setImage:image];
-            }
-        }
-        
-        long currentTimeMs = (long)([[NSDate date] timeIntervalSince1970] * 1000);
-        long timeDiffMs = currentTimeMs - self->lastCaptureTimeMs;
-        long sleepPeriodMs = self->capturePeriodMs - timeDiffMs;
-
-        self->lastCaptureTimeMs = currentTimeMs;
-        
-        if (sleepPeriodMs > 0) {
-            [NSThread sleepForTimeInterval:sleepPeriodMs / 1000.0];
-        }
     }
 }
 
@@ -379,8 +238,6 @@ void onEventSaved(gchar *file_path) {
     // Preparing pipeline
     rct_gst_init(configuration);
     
-    [self startImageCaptureThread];
-    
     // Run pipeline
     if (background_queue != NULL)
         dispatch_async(background_queue, ^{
@@ -391,10 +248,6 @@ void onEventSaved(gchar *file_path) {
 // Memory management
 - (void)terminate
 {
-    [self stopImageCapture];
-
-    [[ImageCache getInstance] getImage:YES];
-
     if (currentInstance == self) {
         currentInstance = nil;
 
@@ -406,61 +259,6 @@ void onEventSaved(gchar *file_path) {
 - (void)dealloc
 {
     [self terminate];
-}
-
-- (void)startImageCaptureThread {
-    if (!atomic_load(&captureFrames)) {
-        return;
-    }
-    NSLog(@"Initializing and starting image capture thread");
-    if (imageCaptureQueue == NULL) {
-        imageCaptureQueue = dispatch_queue_create("RctGstImageCaptureQueue", 0);
-    }
-    
-    if (!atomic_load(&runCopyImageThread)) {
-        atomic_store(&runCopyImageThread, true);
-
-        // Signalled when the loop leaves threadCopyImageFunc, so stopImageCapture
-        // can wait for it instead of just asking it to stop.
-        dispatch_semaphore_t done = dispatch_semaphore_create(0);
-        imageCaptureDone = done;
-
-        dispatch_async(imageCaptureQueue, ^{
-            [self threadCopyImageFunc];
-            dispatch_semaphore_signal(done);
-        });
-    }
-}
-
-- (void)stopImageCapture {
-    NSLog(@"Stopping image capture thread");
-    atomic_store(&runCopyImageThread, false);
-
-    // Wait for the loop to actually exit, don't just ask it to. It reads the
-    // backend's video sink through rct_gst_pull_last_sample, and that backend
-    // state is file-global -- shared by every player instance -- so returning
-    // while a capture is still in flight lets rct_gst_terminate (or a new
-    // instance's rct_gst_init) drop the sink underneath it.
-    //
-    // Bounded, so a wedged Vulkan readback can't hang the caller; the backend
-    // also holds a lock around the sink to keep that case safe.
-    dispatch_semaphore_t done = imageCaptureDone;
-    imageCaptureDone = nil;
-    if (done == nil)
-        return;
-
-    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW,
-                                                    (int64_t)(2 * NSEC_PER_SEC))) != 0)
-        NSLog(@"Image capture thread did not stop within 2s");
-}
-
-- (void)setCaptureFrames:(BOOL)enable {
-    atomic_store(&captureFrames, enable);
-    if (enable) {
-        [self startImageCaptureThread];
-    } else {
-        [self stopImageCapture];
-    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated
@@ -485,8 +283,6 @@ void onEventSaved(gchar *file_path) {
     if (currentInstance != self)
         return;
 
-    [self stopImageCapture];
-
     NSArray<UIView *> *orphans = [self->drawableSurface.subviews copy];
 
     [RCTGstPlayerController enqueuePipelineWork:^{
@@ -509,12 +305,6 @@ void onEventSaved(gchar *file_path) {
     } else {
         dispatch_async(dispatch_get_main_queue(), sweep);
     }
-}
-
-- (void)viewDidDisappear:(BOOL)animated
-{
-    [super viewDidDisappear:animated];
-    [[ImageCache getInstance] getImage:YES];
 }
 
 @end
