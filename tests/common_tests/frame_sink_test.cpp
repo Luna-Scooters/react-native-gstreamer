@@ -105,9 +105,8 @@ protected:
         gst_app_src_set_caps(camera, caps);
         gst_caps_unref(caps);
 
-        // Borrowed, the way the backend holds it.
+        // A ref, the way the backend holds it.
         video_tee = gst_bin_get_by_name(GST_BIN(pipeline), "video-tee");
-        gst_object_unref(video_tee);
 
         GstPtr<GstElement> live(gst_bin_get_by_name(GST_BIN(pipeline), "live"));
         g_signal_connect(live.get(), "handoff", G_CALLBACK(+[](GstElement *, GstBuffer *, GstPad *, gpointer self) {
@@ -137,7 +136,7 @@ protected:
         gst_clear_object(&camera);
         gst_object_unref(pipeline);
         pipeline = nullptr;
-        video_tee = nullptr;
+        gst_clear_object(&video_tee);
     }
 
     GstFlowReturn push(Yuv color)

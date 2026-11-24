@@ -18,12 +18,9 @@
 //
 
 #include "gstreamer_video_writer.h"
-
-// Owned by gstreamer_backend.c
-extern GstElement *pipeline;
+#include "gstreamer_backend.h"
 
 static const guint WRITER_FINALIZE_TIMEOUT_MS = 3000;
-static const GstClockTime WRITER_STATE_TIMEOUT = 100 * GST_MSECOND;
 
 // Tag every element of a record bin with its writer and that writer's generation,
 // so a bus message can be traced back to its writer — even once the bin has been
@@ -155,11 +152,8 @@ static void writer_teardown(RctGstVideoWriter *writer, gboolean ok)
         writer->watchdog_id = 0;
     }
 
-    // Set NULL before removing: a late push from the source hits a flushing pad
-    // (graceful) instead of a not-linked error.
-    gst_element_set_state(writer->rec_bin, GST_STATE_NULL);
-    if (pipeline)
-        gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
+    // The shut gate drops whatever the source still pushes.
+    rct_gst_detach_branch(writer->rec_bin);
     writer->rec_bin = NULL;
 
     // The gate keeps dropping until on_done has blocked (event) or released
@@ -199,8 +193,8 @@ static gpointer writer_push_eos(gpointer data)
 
 gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path, void (*done)(gchar *, gboolean))
 {
-    if (!writer || !src || !path || !*path || !pipeline) {
-        g_printerr("writer_start: bad args or pipeline not ready\n");
+    if (!writer || !src || !path || !*path) {
+        g_printerr("writer_start: bad args\n");
         return FALSE;
     }
 
@@ -245,21 +239,13 @@ gboolean writer_start(RctGstVideoWriter *writer, GstPad *src, const gchar *path,
     g_object_set(writer->rec_bin, "message-forward", TRUE, NULL);
     writer_tag_bin(writer);
 
-    // Bring the branch to PLAYING BEFORE linking, so the source only pushes into a
-    // ready muxer (linking first can wedge a live streaming thread with FLUSHING).
-    gst_bin_add(GST_BIN(pipeline), writer->rec_bin);
-    gst_element_sync_state_with_parent(writer->rec_bin);
-    gst_element_get_state(writer->rec_bin, NULL, NULL, WRITER_STATE_TIMEOUT);
-
+    // The gate goes on before the link, so the source is shielded from the
+    // branch's first push on.
     writer_gate_install(writer, src);
 
-    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(writer->rec_bin, "sink");
-    GstPadLinkReturn link_ret = gst_pad_link(src, bin_sink);
-    if (link_ret != GST_PAD_LINK_OK) {
-        g_printerr("writer_start: failed to link src -> writer (%d)\n", link_ret);
+    if (!rct_gst_attach_branch(writer->rec_bin, src)) {   // drops the bin on failure
+        g_printerr("writer_start: failed to attach the record bin\n");
         writer_gate_remove(writer);   // never linked: nothing to shield
-        gst_element_set_state(writer->rec_bin, GST_STATE_NULL);
-        gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
         writer->rec_bin = NULL;
         g_free(writer->file_path);
         writer->file_path = NULL;
@@ -292,12 +278,8 @@ void writer_reset(RctGstVideoWriter *writer)
         g_source_remove(writer->watchdog_id);
         writer->watchdog_id = 0;
     }
-    if (writer->rec_bin) {
-        gst_element_set_state(writer->rec_bin, GST_STATE_NULL);
-        if (pipeline)
-            gst_bin_remove(GST_BIN(pipeline), writer->rec_bin);
-        writer->rec_bin = NULL;
-    }
+    rct_gst_detach_branch(writer->rec_bin);
+    writer->rec_bin = NULL;
     g_free(writer->file_path);
     writer->file_path = NULL;
     writer->on_done = NULL;

@@ -5,13 +5,13 @@
 //
 
 #include "gstreamer_frame_sink.h"
+#include "gstreamer_backend.h"
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 #include <gst/video/video.h>
 
 // Owned by gstreamer_backend.c
-extern GstElement *pipeline;
 extern GstElement *video_tee;
 
 // A model's input, not a camera image.
@@ -20,11 +20,9 @@ extern GstElement *video_tee;
 // The thread that builds and destroys pipelines and the inference thread both
 // change what follows.
 static GMutex lock;
-static GstVideoInfo out_info;         // RGBA at the size asked for; width 0 while frames aren't wanted
-static GstElement *attached_pipeline;  // ref, from attach to detach
-static GstElement *attached_tee;       // ref, likewise
-static GstPad *tee_pad;                // ref: video-tee's request pad feeding the sink
-static GstAppSink *sink;               // ref, while built
+static GstVideoInfo out_info;  // RGBA at the size asked for; width 0 while frames aren't wanted
+static gboolean attached;      // from attach to detach, on a pipeline with a video-tee
+static GstAppSink *sink;       // ref, while built
 
 // Built for the first frame converted, and kept until a new pipeline or stop:
 // the frames' format doesn't change while a pipeline is up, and the size can't
@@ -45,33 +43,12 @@ static void converter_clear(void)
     g_mutex_unlock(&convert_lock);
 }
 
-// Call with lock.
-static void branch_remove(void)
-{
-    // The tee's pad first: once it is released the tee pushes nothing more
-    // here, and a push still in flight counts as not-linked, not as an error.
-    if (tee_pad) {
-        gst_element_release_request_pad(attached_tee, tee_pad);
-        gst_clear_object(&tee_pad);
-    }
-    if (sink) {
-        GstElement *element = GST_ELEMENT(sink);
-        // Down, and kept down whatever the pipeline does in the meantime.
-        gst_element_set_locked_state(element, TRUE);
-        gst_element_set_state(element, GST_STATE_NULL);
-        g_autoptr(GstObject) parent = gst_element_get_parent(element);
-        if (parent)
-            gst_bin_remove(GST_BIN(parent), element);
-        gst_clear_object(&sink);
-    }
-}
-
 // Build the branch - one appsink on video-tee - if frames are wanted and there
 // is a pipeline to hang it on. -1 if it should be there and isn't, otherwise 0.
 // Call with lock.
 static int branch_build(void)
 {
-    if (sink || !attached_pipeline || !GST_VIDEO_INFO_WIDTH(&out_info))
+    if (sink || !attached || !GST_VIDEO_INFO_WIDTH(&out_info))
         return 0;
 
     GstElement *element = gst_element_factory_make("appsink", "frame-sink");
@@ -91,20 +68,10 @@ static int branch_build(void)
                  "wait-on-eos", FALSE,
                  NULL);
 
-    gst_bin_add(GST_BIN(attached_pipeline), element);   // sinks the floating ref
-    sink = GST_APP_SINK(gst_object_ref(element));
-
-    // Up to the pipeline's state before linking: a push into a pad that isn't
-    // active yet returns FLUSHING, which the tee passes upstream, and the
-    // source stops for good.
-    if (!gst_element_sync_state_with_parent(element))
-        g_printerr("frame sink: could not bring the sink to the pipeline's state\n");
-
-    tee_pad = gst_element_request_pad_simple(attached_tee, "src_%u");
-    g_autoptr(GstPad) sink_pad = gst_element_get_static_pad(element, "sink");
-    if (!tee_pad || GST_PAD_LINK_FAILED(gst_pad_link(tee_pad, sink_pad))) {
-        g_printerr("frame sink: failed to link video-tee -> frame sink\n");
-        branch_remove();
+    sink = GST_APP_SINK(gst_object_ref_sink(element));
+    if (!rct_gst_tap_video(element)) {
+        g_printerr("frame sink: failed to attach to video-tee\n");
+        gst_clear_object(&sink);
         return -1;
     }
 
@@ -114,22 +81,25 @@ static int branch_build(void)
 }
 
 // Call with lock.
+static void branch_remove(void)
+{
+    rct_gst_untap_video(GST_ELEMENT(sink));
+    gst_clear_object(&sink);   // so branch_build makes the next one
+}
+
+// Call with lock.
 static void detach_locked(void)
 {
     branch_remove();
-    gst_clear_object(&attached_tee);
-    gst_clear_object(&attached_pipeline);
+    attached = FALSE;
 }
 
 void rct_gst_frame_sink_attach(void)
 {
     g_mutex_lock(&lock);
     detach_locked();
-    if (pipeline && video_tee) {   // the debug pipeline has no tee
-        attached_pipeline = gst_object_ref(pipeline);
-        attached_tee = gst_object_ref(video_tee);
-        branch_build();
-    }
+    attached = video_tee != NULL;   // the debug pipeline has no tee
+    branch_build();
     g_mutex_unlock(&lock);
     converter_clear();   // the new pipeline's frames may differ
 }

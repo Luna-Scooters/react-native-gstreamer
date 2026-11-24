@@ -35,6 +35,7 @@ GstElement* audio_level_element;
 // Sinks
 GstElement *audio_sink;
 
+#define RCT_GST_VIDEO_TEE "video-tee"
 GstElement *video_tee; // Recording pipeline will attached here
 
 // Getters
@@ -542,6 +543,92 @@ static GstElement *pipeline_ref(void)
     return ref;
 }
 
+/*****************
+ CONSUMER BRANCHES
+ ****************/
+
+static const GstClockTime BRANCH_STATE_TIMEOUT = 500 * GST_MSECOND;
+
+static gboolean branch_attach(GstElement *branch, GstPad *src)
+{
+    g_autoptr(GstElement) target = pipeline_ref();
+    if (!target || !gst_bin_add(GST_BIN(target), branch)) {
+        g_printerr("Could not add %s to the pipeline\n", GST_ELEMENT_NAME(branch));
+        return FALSE;
+    }
+
+    if (!gst_element_sync_state_with_parent(branch))
+        g_printerr("%s could not reach the pipeline's state\n", GST_ELEMENT_NAME(branch));
+    gst_element_get_state(branch, NULL, NULL, BRANCH_STATE_TIMEOUT);
+
+    g_autoptr(GstPad) sink = gst_element_get_static_pad(branch, "sink");
+    if (gst_pad_link(src, sink) != GST_PAD_LINK_OK) {
+        g_printerr("Could not link %s:%s to %s (%s)\n", GST_DEBUG_PAD_NAME(src),
+                   GST_ELEMENT_NAME(branch), gst_pad_link_get_name(ret));
+        rct_gst_detach_branch(branch);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+gboolean rct_gst_attach_branch(GstElement *branch, GstPad *src)
+{
+    g_return_val_if_fail(GST_IS_ELEMENT(branch), FALSE);
+    // Taken, so a branch that never makes it into the pipeline is dropped.
+    g_autoptr(GstElement) owned = gst_object_ref_sink(branch);
+    if (!src) {
+        g_printerr("%s not attached: no source pad\n", GST_ELEMENT_NAME(branch));
+        return FALSE;
+    }
+    return branch_attach(branch, src);
+}
+
+gboolean rct_gst_tap_video(GstElement *branch)
+{
+    g_return_val_if_fail(GST_IS_ELEMENT(branch), FALSE);
+    g_autoptr(GstElement) owned = gst_object_ref_sink(branch);   // as above
+    GstElement *tee = video_tee;
+    if (!tee) {
+        // The debug pipeline has none.
+        g_printerr("%s not attached: no " RCT_GST_VIDEO_TEE "\n", GST_ELEMENT_NAME(branch));
+        return FALSE;
+    }
+    g_autoptr(GstPad) tee_pad = gst_element_request_pad_simple(tee, "src_%u");
+    if (!tee_pad) {
+        g_printerr("%s not attached: could not get a tee pad\n", GST_ELEMENT_NAME(branch));
+        return FALSE;
+    }
+    if (branch_attach(branch, tee_pad))
+        return TRUE;
+    gst_element_release_request_pad(tee, tee_pad);
+    return FALSE;
+}
+
+void rct_gst_detach_branch(GstElement *branch)
+{
+    if (!branch)
+        return;
+    // Down, and kept down whatever the pipeline does in the meantime.
+    gst_element_set_locked_state(branch, TRUE);
+    gst_element_set_state(branch, GST_STATE_NULL);
+    g_autoptr(GstObject) parent = gst_element_get_parent(branch);
+    if (parent)
+        gst_bin_remove(GST_BIN(parent), branch);
+}
+
+void rct_gst_untap_video(GstElement *branch)
+{
+    if (!branch)
+        return;
+
+    g_autoptr(GstPad) sink = gst_element_get_static_pad(branch, "sink");
+    g_autoptr(GstPad) tee_pad = sink ? gst_pad_get_peer(sink) : NULL;
+    g_autoptr(GstElement) tee = tee_pad ? gst_pad_get_parent_element(tee_pad) : NULL;
+    if (tee)
+        gst_element_release_request_pad(tee, tee_pad);
+    rct_gst_detach_branch(branch);
+}
+
 GstStateChangeReturn rct_gst_set_pipeline_state(GstState state)
 {
     g_print("Pipeline state requested : %s\n", gst_element_state_get_name(state));
@@ -606,7 +693,7 @@ static void destroy_pipeline(void)
     }
     bus = NULL;   // unreffed in rct_gst_init; never dereference it again
 
-    video_tee = NULL;
+    gst_clear_object(&video_tee);
     audio_level_element = NULL;   // owned by the bin from create_audio_sink()
 }
 
@@ -624,7 +711,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
         "rtspsrc is-live=true protocols=tcp latency=0 drop-on-latency=false name=src "
         "do-retransmission=false tcp-timeout=2000000 "
         "teardown-timeout=2000000000 "
-        "tee name=video-tee ! " RCT_GST_DISPLAY_BRANCH;
+        "tee name=" RCT_GST_VIDEO_TEE " ! " RCT_GST_DISPLAY_BRANCH;
     g_print("Launch command: %s\n", launch_command_app);
 
     // Prepare pipeline. If not working, will display an error video signal
@@ -640,11 +727,7 @@ void rct_gst_init(RctGstConfiguration *configuration)
         return;
     }
 
-    GstElement *tee = gst_bin_get_by_name(GST_BIN(new_pipeline), "video-tee");
-    if (tee) {
-        video_tee = tee;               // borrowed, the pipeline owns it
-        gst_object_unref(tee);
-    }
+    video_tee = gst_bin_get_by_name(GST_BIN(new_pipeline), RCT_GST_VIDEO_TEE);   // NULL in the debug pipeline
 
     // Reject the camera's audio stream at RTSP SETUP time. Critical on iOS: a
     // dangling (or even set-up) audio stream starves video over the shared
