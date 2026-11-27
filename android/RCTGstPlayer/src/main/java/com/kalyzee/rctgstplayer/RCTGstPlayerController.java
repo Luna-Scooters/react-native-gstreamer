@@ -1,12 +1,7 @@
 package com.kalyzee.rctgstplayer;
 
-import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
-import android.os.Build;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
-import android.view.PixelCopy;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.View;
@@ -21,12 +16,8 @@ import com.facebook.react.uimanager.UIManagerHelper;
 import com.facebook.react.uimanager.events.Event;
 import com.facebook.react.uimanager.events.EventDispatcher;
 import com.kalyzee.rctgstplayer.utils.EaglUIView;
-import com.kalyzee.rctgstplayer.utils.ImageCache;
 import com.kalyzee.rctgstplayer.utils.RCTGstConfiguration;
 import com.kalyzee.rctgstplayer.utils.RCTGstConfigurationCallable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import org.freedesktop.gstreamer.GStreamer;
 
 /**
@@ -44,11 +35,6 @@ public class RCTGstPlayerController
   private EaglUIView view;
   private Surface surface;   // over the view's SurfaceTexture, while it has one
   private ReactContext context;
-
-  private AtomicBoolean runCopyImageThread = new AtomicBoolean(false);
-  private CountDownLatch latchCopyImage;
-  private Thread thCopyImage;
-  private final AtomicBoolean captureFrames = new AtomicBoolean(false);
 
   // Native methods
   private native String nativeRCTGstGetGStreamerInfo();
@@ -175,64 +161,6 @@ public class RCTGstPlayerController
     }
   }
 
-  private final int captureFps = 30; /* Capture Frame Rate of 30 FPS */
-  private final double capturePeriodMs = (1.0 / (double)captureFps) * 1000.0; /* Convert Capture FPS to Capture Period in ms */
-  private long lastCaptureTimeMs = System.currentTimeMillis();
-  private void threadCopyImageFunc() {
-    while (runCopyImageThread.get()) {
-      try {
-        Bitmap bitmap = Bitmap.createBitmap(view.getWidth(), view.getHeight(),
-                                            Bitmap.Config.ARGB_8888);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-          latchCopyImage = new CountDownLatch(1);
-          PixelCopy.request(surface, bitmap, ret -> {
-            if (ret == PixelCopy.SUCCESS) {
-              ImageCache.getInstance().setBitmap(bitmap);
-            }
-            lastCaptureTimeMs = System.currentTimeMillis();
-            latchCopyImage.countDown();
-          }, new Handler(Looper.getMainLooper()));
-          latchCopyImage.await(500, TimeUnit.MILLISECONDS);
-
-          /* Sleep Thread to keep the capture rate */
-          long currentTimeMs = System.currentTimeMillis();
-          long timeDiffMs = currentTimeMs - lastCaptureTimeMs;
-          long sleepPeriodMs = (long)(capturePeriodMs - timeDiffMs);
-          if (sleepPeriodMs > 0) {
-            Thread.sleep(sleepPeriodMs);
-          }
-        }
-        Thread.yield();
-      } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
-    }
-  }
-
-  private synchronized void startCaptureThread() {
-    if (!captureFrames.get() || !isInited || runCopyImageThread.get()) {
-      return;
-    }
-    runCopyImageThread.set(true);
-    thCopyImage = new Thread(this::threadCopyImageFunc);
-    thCopyImage.start();
-  }
-
-  private synchronized void stopCaptureThread() {
-    if (!runCopyImageThread.get()) {
-      return;
-    }
-    runCopyImageThread.set(false);
-    try {
-      if (thCopyImage != null) {
-        thCopyImage.join();
-      }
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
-    thCopyImage = null;
-  }
-
   // Surface callbacks
   @Override
   public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture,
@@ -249,8 +177,6 @@ public class RCTGstPlayerController
 
       // Init done
       this.isInited = true;
-
-      startCaptureThread();
     }
 
     nativeRCTGstSetDrawableSurface(surface);
@@ -264,8 +190,6 @@ public class RCTGstPlayerController
 
   @Override
   public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surfaceTexture) {
-    stopCaptureThread();
-
     // Nothing may draw into the surface once this returns, while the pipeline
     // outlives it: React Native removing the view before onDropViewInstance
     // terminates the player, say. The app going to background is not one of
@@ -290,8 +214,6 @@ public class RCTGstPlayerController
   // would stay held for the lifetime of the process, so the next mount could not
   // encode. Runs on the UI thread.
   synchronized void terminate() {
-    stopCaptureThread();
-
     if (!isInited) {
       return;
     }
@@ -333,15 +255,6 @@ public class RCTGstPlayerController
 
   void setRctGstDebugging(boolean isDebugging) {
     nativeRCTGstSetDebugging(isDebugging);
-  }
-
-  void setCaptureFrames(boolean enable) {
-    captureFrames.set(enable);
-    if (enable) {
-      startCaptureThread();
-    } else {
-      stopCaptureThread();
-    }
   }
 
   // Manager methods

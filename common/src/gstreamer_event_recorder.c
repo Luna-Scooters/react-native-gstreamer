@@ -25,15 +25,11 @@
 
 #include <glib/gstdio.h>
 
-// Owned by gstreamer_backend.c
-extern GstElement *pipeline;
-
 #define EVR_FKU_MS   1000            // force a keyframe every second
 #define EVR_BACKLOG_SLACK_SEC 1                    // keep a bit more than PRE so the
                                                    // keyframe drop still leaves ~PRE s
 #define EVR_BACKLOG_MAX_FPS            60
 #define EVR_BACKLOG_MAX_BYTES_PER_SEC  (1024 * 1024)
-static const GstClockTime EVR_STATE_TIMEOUT    = 200 * GST_MSECOND;
 
 typedef struct {
     GstElement  *event_queue;       // persistent leaky backlog queue, NULL when disarmed
@@ -155,46 +151,39 @@ void rct_gst_event_recorder_set_buffering(gboolean enable, gint video_pre_length
     }
     if (eventRecorder.event_queue)
         return;   // already armed
-    if (!pipeline) {
-        g_printerr("event_recorder: pipeline not ready\n");
-        return;
-    }
 
     eventRecorder.video_pre_length  = (video_pre_length  > 0) ? (guint)video_pre_length  : 0;
     eventRecorder.video_post_length = (video_post_length > 0) ? (guint)video_post_length : 0;
 
+    // Tap the H.264 feed. Until evq is linked to it, the feed's tee lets the
+    // pad go unlinked, as it does for the ride recorder's.
+    eventRecorder.feed_pad = rct_gst_h264_request_src_pad();
+    if (!eventRecorder.feed_pad) {
+        g_printerr("event_recorder: h264 feed gave no src pad\n");
+        return;
+    }
+
     // Leaky backlog: always keeps the most recent PRE (+slack) seconds.
     guint backlog_sec = eventRecorder.video_pre_length + EVR_BACKLOG_SLACK_SEC;
-    eventRecorder.event_queue = gst_element_factory_make("queue", "evq");
-    g_object_set(eventRecorder.event_queue,
+    GstElement *queue = gst_element_factory_make("queue", "evq");
+    g_object_set(queue,
         "max-size-buffers", (guint)(backlog_sec * EVR_BACKLOG_MAX_FPS),
         "max-size-bytes",   (guint)(backlog_sec * EVR_BACKLOG_MAX_BYTES_PER_SEC),
         "max-size-time",    (guint64)backlog_sec * GST_SECOND,
         "leaky",            2,   // 2 = downstream: drop the OLDEST when full
         NULL);
-    gst_bin_add(GST_BIN(pipeline), eventRecorder.event_queue);
 
     // Block the queue's output, then start it: it fills but records nothing.
-    eventRecorder.event_queue_src = gst_element_get_static_pad(eventRecorder.event_queue, "src");
+    eventRecorder.event_queue_src = gst_element_get_static_pad(queue, "src");
     eventRecorder.block_id = gst_pad_add_probe(eventRecorder.event_queue_src,
         GST_PAD_PROBE_TYPE_BLOCK | GST_PAD_PROBE_TYPE_BUFFER, evr_block_probe, NULL, NULL);
-    gst_element_sync_state_with_parent(eventRecorder.event_queue);
-    gst_element_get_state(eventRecorder.event_queue, NULL, NULL, EVR_STATE_TIMEOUT);
 
-    // Link the H.264 feed in only once evq is running (avoids a flushing race on
-    // the shared streaming thread).
-    eventRecorder.feed_pad = rct_gst_h264_request_src_pad();
-    if (!eventRecorder.feed_pad) {
-        g_printerr("event_recorder: h264 feed gave no src pad\n");
+    if (!rct_gst_attach_branch(queue, eventRecorder.feed_pad)) {
+        g_printerr("event_recorder: failed to attach the backlog queue\n");
         rct_gst_event_recorder_reset();
         return;
     }
-    g_autoptr(GstPad) event_queue_sink = gst_element_get_static_pad(eventRecorder.event_queue, "sink");
-    if (gst_pad_link(eventRecorder.feed_pad, event_queue_sink) != GST_PAD_LINK_OK) {
-        g_printerr("event_recorder: failed to link h264 feed -> backlog queue\n");
-        rct_gst_event_recorder_reset();
-        return;
-    }
+    eventRecorder.event_queue = queue;   // borrowed, the pipeline owns it
 
     eventRecorder.fku_timer_id = g_timeout_add(EVR_FKU_MS, evr_force_keyframe, NULL);
     g_print("Event recorder armed (backlog %us, post %us)\n",
@@ -213,10 +202,6 @@ void rct_gst_event_recorder_save(const gchar *file_path)
     }
     if (eventRecorder.video_writer.rec_bin) {
         g_print("event save: a clip is already recording\n");
-        return;
-    }
-    if (!pipeline) {
-        g_printerr("event save: pipeline not ready\n");
         return;
     }
 
@@ -263,10 +248,7 @@ void rct_gst_event_recorder_reset(void)
         rct_gst_h264_release_src_pad(eventRecorder.feed_pad);
         eventRecorder.feed_pad = NULL;
     }
-    if (eventRecorder.event_queue) {
-        gst_element_set_state(eventRecorder.event_queue, GST_STATE_NULL);
-        if (pipeline)
-            gst_bin_remove(GST_BIN(pipeline), eventRecorder.event_queue);
-        eventRecorder.event_queue = NULL;
-    }
+
+    rct_gst_detach_branch(eventRecorder.event_queue);
+    eventRecorder.event_queue = NULL;
 }

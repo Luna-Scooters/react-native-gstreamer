@@ -7,6 +7,9 @@ def reactNativeArchitectures() {
 
 android {
     compileSdkVersion 36
+    if (rootProject.ext.has('ndkVersion')) {
+        ndkVersion rootProject.ext.ndkVersion
+    }
 
     defaultConfig {
         minSdkVersion 25
@@ -27,7 +30,7 @@ android {
 
                 def javaSrcDir = file('src/main/java').absolutePath
                 def assetsDir = file('src/main/assets').absolutePath
-                arguments "-DANDROID_PLATFORM=android-27", "-DGSTREAMER_JAVA_SRC_DIR=$javaSrcDir", "-DGSTREAMER_ROOT_ANDROID=$gstRoot", "-DGSTREAMER_ASSETS_DIR=$assetsDir"
+                arguments "-DANDROID_PLATFORM=android-27", "-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON", "-DGSTREAMER_JAVA_SRC_DIR=$javaSrcDir", "-DGSTREAMER_ROOT_ANDROID=$gstRoot", "-DGSTREAMER_ASSETS_DIR=$assetsDir"
 
                 targets "rctgstplayer"
 
@@ -47,6 +50,25 @@ android {
         cmake {
             path '../CMakeLists.txt'
         }
+    }
+
+    buildFeatures {
+        prefabPublishing true
+    }
+
+    prefab {
+        rctgstplayer {
+            headers "${projectDir}/../../common/include"
+        }
+    }
+}
+
+// The native build re-copies GStreamer.java into src/main/java and produces the prefab's .so.
+tasks.configureEach { task ->
+    def matcher = task.name =~ /^(?:prefab(\w+)ConfigurePackage|compile(\w+)JavaWithJavac)$/
+    if (matcher.matches()) {
+        def nativeBuild = "externalNativeBuild${matcher.group(1) ?: matcher.group(2)}"
+        task.dependsOn(tasks.matching { it.name == nativeBuild })
     }
 }
 

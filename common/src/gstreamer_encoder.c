@@ -11,7 +11,6 @@
 
 // Owned by gstreamer_backend.c
 extern GstElement *pipeline;
-extern GstElement *video_tee;
 
 // File-size controls, shared by every consumer (ride + event recorder)
 static const gint FALLBACK_HEIGHT = 360;
@@ -21,23 +20,21 @@ static const gint MIN_BITRATE_KBPS = 500;
 static const gint MAX_BITRATE_KBPS = 4000;
 static const gdouble BITS_PER_PIXEL = 0.1;
 static const gint KEYFRAME_INTERVAL_SEC = 3;
-static const GstClockTime ENC_STATE_TIMEOUT = 500 * GST_MSECOND;
 
 typedef struct {
     GstElement *bin;      // queue ! videorate ! videoconvert ! enc ! h264parse ! tee(enc-tee)
     GstElement *enc_tee;  // borrowed (owned by bin) — internal tap point
-    GstPad     *tee_pad;  // video-tee src pad feeding the branch
 } RctGstEncoder;
 
-RctGstEncoder enc = { NULL, NULL, NULL };
+RctGstEncoder enc = { NULL, NULL };
 
-static void configure_h264_encoder()
+static void configure_h264_encoder(GstElement *bin)
 {
     gint width = FALLBACK_WIDTH, height = FALLBACK_HEIGHT, fps = FALLBACK_FPS;
     if (!rct_gst_get_video_info(&width, &height, &fps))
         g_print("Failed to get video info, using fallback %dx%d @ %dfps\n", width, height, fps);
 
-    g_autoptr(GstElement) venc = gst_bin_get_by_name(GST_BIN(enc.bin), "venc");
+    g_autoptr(GstElement) venc = gst_bin_get_by_name(GST_BIN(bin), "venc");
     if (venc) {
         gdouble bits = (gdouble)width * height * fps * BITS_PER_PIXEL;
         gint bitrate_kbps = (gint)(bits / 1000.0);
@@ -122,10 +119,6 @@ static gboolean encoder_build(void)
 {
     if (enc.bin)
         return TRUE;
-    if (!video_tee || !pipeline) {
-        g_printerr("encoder: no video-tee available (pipeline not ready)\n");
-        return FALSE;
-    }
 
     gint w, h, fps = FALLBACK_FPS;
     if (rct_gst_get_video_info(&w, &h, &fps))
@@ -162,43 +155,36 @@ static gboolean encoder_build(void)
         caps->str, selected_encoder);
 
     g_autoptr(GError) error = NULL;
-    enc.bin = gst_parse_bin_from_description(desc, TRUE, &error);
-    if (!enc.bin) {
+    GstElement *bin = gst_parse_bin_from_description(desc, TRUE, &error);
+    if (!bin) {
         g_printerr("encoder: branch build failed: %s\n", error ? error->message : "?");
         return FALSE;
     }
 
-    configure_h264_encoder();
-
-    enc.enc_tee = gst_bin_get_by_name(GST_BIN(enc.bin), "enc-tee");
-    if (enc.enc_tee)
-        gst_object_unref(enc.enc_tee);  // borrowed; the bin owns it
+    configure_h264_encoder(bin);
 
     // Watch the encoder's OUTPUT: amcvidenc stamps its first buffer 0 (see
     // enc_out_fixup_probe). enc-tee's sink is the single point every consumer's
     // frames pass through.
-    if (enc.enc_tee) {
-        g_autoptr(GstPad) tee_sink = gst_element_get_static_pad(enc.enc_tee, "sink");
+    g_autoptr(GstElement) enc_tee = gst_bin_get_by_name(GST_BIN(bin), "enc-tee");
+    if (enc_tee) {
+        g_autoptr(GstPad) tee_sink = gst_element_get_static_pad(enc_tee, "sink");
         if (tee_sink) {
             gst_pad_add_probe(tee_sink, GST_PAD_PROBE_TYPE_BUFFER,
                               enc_out_fixup_probe, NULL, NULL);
         }
     }
 
-    gst_bin_add(GST_BIN(pipeline), enc.bin);
+    // And its INPUT, as it comes in from video-tee.
+    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(bin, "sink");
+    gst_pad_add_probe(bin_sink, GST_PAD_PROBE_TYPE_BUFFER, enc_pts_repair_probe, NULL, NULL);
 
-    // Reach PLAYING BEFORE linking, pushing into a pad that is not active yet returns 
-    // GST_FLOW_FLUSHING, which the tee propagates upstream and the source task pauses for good
-    gst_element_sync_state_with_parent(enc.bin);
-    gst_element_get_state(enc.bin, NULL, NULL, ENC_STATE_TIMEOUT);
-    enc.tee_pad = gst_element_request_pad_simple(video_tee, "src_%u");
-    gst_pad_add_probe(enc.tee_pad, GST_PAD_PROBE_TYPE_BUFFER, enc_pts_repair_probe, NULL, NULL);
-    g_autoptr(GstPad) bin_sink = gst_element_get_static_pad(enc.bin, "sink");
-    if (gst_pad_link(enc.tee_pad, bin_sink) != GST_PAD_LINK_OK) {
-        g_printerr("encoder: failed to link video-tee -> encoder\n");
-        rct_gst_encoder_reset();
+    if (!rct_gst_tap_video(bin)) {   // takes the bin, and drops it on failure
+        g_printerr("encoder: failed to attach to video-tee\n");
         return FALSE;
     }
+    enc.bin = bin;
+    enc.enc_tee = enc_tee;
     return TRUE;
 }
 
@@ -223,22 +209,8 @@ void rct_gst_encoder_force_keyframe(void)
 
 void rct_gst_encoder_reset(void)
 {
-    if (enc.bin) {
-        gst_element_set_state(enc.bin, GST_STATE_NULL);
-        g_autoptr(GstObject) parent = gst_element_get_parent(enc.bin);
-        if (parent) {
-            gst_bin_remove(GST_BIN(parent), enc.bin);
-        } else {
-            gst_object_unref(enc.bin);
-        }
-        enc.bin = NULL;
-    }
-    if (enc.tee_pad) {
-        if (video_tee)
-            gst_element_release_request_pad(video_tee, enc.tee_pad);
-        gst_object_unref(enc.tee_pad);
-        enc.tee_pad = NULL;
-    }
+    rct_gst_untap_video(enc.bin);
+    enc.bin = NULL;
     enc.enc_tee = NULL;
     enc_first_in_pts = GST_CLOCK_TIME_NONE;
     enc_out_checked = FALSE;

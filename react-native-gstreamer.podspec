@@ -15,7 +15,8 @@ Pod::Spec.new do |s|
   gst_plugins = `cmake -P gst-plugins.cmake`.strip
 
   s.source_files = "ios/RCTGstPlayer/*.{h,m}", "common/include/*.h", "common/src/*.c"
-  s.public_header_files = "ios/RCTGstPlayer/*.h"
+  # gstreamer_frame_sink.h: plain C, for the app's inference code to include.
+  s.public_header_files = "ios/RCTGstPlayer/*.h", "common/include/gstreamer_frame_sink.h"
   
   gst_root = '$(PODS_ROOT)/../../GStreamer-iOS/GStreamer.xcframework'
   gst_device = "#{gst_root}/ios-arm64"

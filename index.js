@@ -167,7 +167,6 @@ export default class GstPlayer extends React.Component {
                 uri={this.props.uri || undefined}
                 audioLevelRefreshRate={this.props.audioLevelRefreshRate !== undefined ? this.props.audioLevelRefreshRate : 100}
                 isDebugging={this.props.isDebugging !== undefined ? this.props.isDebugging : false}
-                captureFrames={this.props.captureFrames !== undefined ? this.props.captureFrames : false}
 
                 onPlayerInit={this.onPlayerInit.bind(this)}
                 onStateChanged={this.onStateChanged.bind(this)}
@@ -193,7 +192,6 @@ GstPlayer.propTypes = {
     autoPlay: PropTypes.bool,
     audioLevelRefreshRate: PropTypes.number,
     isDebugging: PropTypes.bool,
-    captureFrames: PropTypes.bool,
 
     // Events callbacks
     onPlayerInit: PropTypes.func,

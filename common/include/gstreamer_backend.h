@@ -61,7 +61,20 @@ void apply_uri();
 
 gboolean rct_gst_get_video_info(gint *width, gint *height, gint *fps);
 
+// Feed `branch` from `src`.
+gboolean rct_gst_attach_branch(GstElement *branch, GstPad *src);
+
+// Feed `branch` from a new pad on video-tee: the decoded frames.
+gboolean rct_gst_tap_video(GstElement *branch);
+
+// Take `branch` down and out of the pipeline.
+void rct_gst_detach_branch(GstElement *branch);
+
+// Release the video-tee pad feeding `branch`, then detach it.
+void rct_gst_untap_video(GstElement *branch);
+
 #include "gstreamer_display.h"
+#include "gstreamer_frame_sink.h"
 #include "gstreamer_h264_feed.h"
 #include "gstreamer_recorder.h"
 #include "gstreamer_event_recorder.h"

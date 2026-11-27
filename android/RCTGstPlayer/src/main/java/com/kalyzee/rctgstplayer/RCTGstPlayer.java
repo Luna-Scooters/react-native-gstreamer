@@ -56,13 +56,8 @@ public class RCTGstPlayer extends SimpleViewManager {
     }
 
     @ReactProp(name = "isDebugging")
-    public void setAudioLevelRefreshRate(View controllerView, boolean isDebugging) {
+    public void setIsDebugging(View controllerView, boolean isDebugging) {
         this.playerController.setRctGstDebugging(isDebugging);
-    }
-
-    @ReactProp(name = "captureFrames", defaultBoolean = false)
-    public void setCaptureFrames(View controllerView, boolean captureFrames) {
-        this.playerController.setCaptureFrames(captureFrames);
     }
 
     // Methods

@@ -25,6 +25,5 @@
 
 // Runs work on the same queue as the state changes
 + (void) enqueuePipelineWork:(dispatch_block_t)work;
-- (void) setCaptureFrames:(BOOL)enable;
 - (RctGstConfiguration *) getConfiguration;
 @end
